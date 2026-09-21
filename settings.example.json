@@ -1,0 +1,56 @@
+{
+  "api_keys": {
+    "openai": "",
+    "anthropic": "",
+    "gemini": "",
+    "openrouter": "",
+    "groq": "",
+    "deepseek": "",
+    "zai": ""
+  },
+  "providers": {
+    "deepseek": {
+      "adapter": "openai",
+      "base_url": "https://api.deepseek.com",
+      "models": [
+        "deepseek-flash",
+        "deepseek-chat",
+        "deepseek-reasoner"
+      ]
+    },
+    "zai": {
+      "adapter": "openai",
+      "base_url": "https://api.z.ai/api/coding/paas/v4",
+      "models": [
+        "glm-5.3",
+        "glm-4.7",
+        "GLM-5.3-Flash"
+      ]
+    }
+  },
+  "cli_paths": {
+    "claude": "claude",
+    "gemini": "gemini",
+    "hermes": "hermes",
+    "openclaw": "openclaw",
+    "codex": "codex",
+    "agy": "agy"
+  },
+  "cli_auth_enabled": {
+    "claude": false,
+    "gemini": false,
+    "hermes": false,
+    "openclaw": false,
+    "codex": false,
+    "agy": false
+  },
+  "default_ceo_model": "gemini/gemini-2.5-pro",
+  "default_manager_model": "gemini/gemini-2.5-flash",
+  "inactivity_timeout_seconds": 1800,
+  "heartbeat_interval_seconds": 15,
+  "max_tool_rounds": 40,
+  "max_autonomous_turns": 100,
+  "max_workers": 12,
+  "request_timeout_seconds": 3600,
+  "max_output_tokens": 8192
+}
