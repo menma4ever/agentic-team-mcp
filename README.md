@@ -60,23 +60,6 @@ The **Agentic Team MCP** ecosystem evolved from a single-process command runner 
 
 ---
 
-## 📅 Chronological Engineering Timeline (The 10 Epochs)
-
-| Epoch | Primary Engineering Focus | Key Deliverables & Milestones |
-|---|---|---|
-| **Epoch 1** | Initial Architecture & CLI Execution | Single worker launcher, DeepSeek CLI harness integration, basic token budgeting. |
-| **Epoch 2** | Google Multi-Account Auth Pool | Isolated `auth_dir` profiles, Windows Keyring isolation, 429 quota failover, 1-click terminal OAuth login. |
-| **Epoch 3** | Web Studio Dashboard & Visual Flow | Node graph canvas, drag-and-drop fix, live SVG communication links, token/pricing meters. |
-| **Epoch 4** | Multi-Harness & Multi-Provider Engine | Codex CLI, Claude Code CLI, Experiential Labs (`xpl`), GPT-6 Sol, Claude 5.5 Opus integration. |
-| **Epoch 5** | Root Watchdog & Telegram Bridge | `@ufljarvisbot` bridge, chat whitelisting, typing simulation, voice STT, vision ingestion, `[DISPATCH]`. |
-| **Epoch 6** | Strict Escalation Hierarchy & Manifesto | CEO quota protection rules, anti-spam quiescence, external model permission gate, `AGENTS.md`. |
-| **Epoch 7** | SDE Research & Quantization Pipeline | Gated DeltaNet audits, SwiGLU ternary STE, tied-embedding controls, SDE43 formal specification. |
-| **Epoch 8** | Cloud GPU Distillation & Training | RunPod L40 deployment, cap removal, 5,000 steps distillation, zero-burn automated teardown ($1.27 spend). |
-| **Epoch 9** | HF Hub Storage Limits & CPU Validation | Step 5,000 quota tripwire, Step 4,500 model preservation, offline CPU eval (81.5% collapse recovery). |
-| **Epoch 10** | Studio Daemon Hardening & Port Audit | Starlette wildcard path crash fix, port 8765 socket collision handling with UFL Job Scout. |
-
----
-
 ## 🔬 Subsystem Deep Dives
 
 ### 1. Google Multi-Account Auth Pool (`core/auth_pool.py`)
