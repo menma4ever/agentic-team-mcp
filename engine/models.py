@@ -13,6 +13,7 @@ class Role(str, Enum):
     CEO = 'CEO'
     MANAGER = 'MANAGER'
     WORKER = 'WORKER'
+    WATCHDOG = 'WATCHDOG'
 
 
 class AgentStatus(str, Enum):
@@ -69,6 +70,7 @@ class AgentNode(BaseModel):
     provider: str = 'google'
     auth_slot_id: Optional[str] = None
     forced_auth_slot_id: Optional[str] = None
+    last_turn_usage: Optional[dict] = None
 
     def update_heartbeat(self):
         self.last_heartbeat = now()

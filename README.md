@@ -6,7 +6,32 @@
 [![Local-First](https://img.shields.io/badge/Architecture-Local--First-orange.svg)](#)
 [![Autonomous Multi-Agent](https://img.shields.io/badge/Agents-Autonomous_Multi--Agent-purple.svg)](#)
 
-> **Agentic Team MCP** is an enterprise-grade, local-first multi-agent orchestration platform designed around the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). It establishes a persistent, hierarchical agent workforce (CEO Strategy → Manager Execution → Specialist Workers) that bridges native CLI coding environments (Claude Code, Gemini Antigravity, Codex) with unified direct API providers (DeepSeek, Z.ai/GLM, Google Gemini, OpenAI, and OpenRouter).
+![Agentic Team Web Studio Floor](assets/web_studio_team_floor.png)
+*Live interactive Web Studio floor visualization showing Root Watchdog supervision, hierarchical reporting trees, and dynamic agent collaboration links. (See animated GIF: [`assets/web_studio_preview.gif`](assets/web_studio_preview.gif))*
+
+> **Agentic Team MCP** is an enterprise-grade, local-first multi-agent orchestration platform designed around the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). It establishes a persistent, hierarchical agent workforce (Root Watchdog Supervisor → CEO Strategy → Manager Execution → Specialist Workers) that bridges native CLI coding environments (Claude Code, Gemini Antigravity, Codex) with unified direct API providers (DeepSeek, Z.ai/GLM, Google Gemini, OpenAI, and OpenRouter).
+
+---
+
+## 🚀 v0.2.0 Release Highlights
+
+The **v0.2.0** update introduces major runtime resilience upgrades, live human supervision bridges, an interactive Web Studio floor, and expanded test suites:
+
+- **🛡️ Root Watchdog Supervision & Telegram Escalation Bridge**:
+  - Always-on supervisor agent (`Root_Watchdog`) continuously monitors team health, queue velocity, and agent lifecycles.
+  - Bidirectional Telegram bridge (`core/telegram_bridge.py`, `core/telegram_supervisor.py`) enables instant mobile alerts, human escalation queries, and command steering directly from your phone.
+- **🖥️ Full-Screen Interactive Web Studio Team Floor**:
+  - Crisp, real-time agent floor visualization (`web/static/studio.js`, `web/static/workspace.css`) displaying live node topology, reporting trees, and dynamic collaboration links.
+  - Dedicated full-screen floor mode (`assets/web_studio_team_floor.png`, `assets/web_studio_preview.gif`) with live status indicators, model badges, and interactive inspection drawers.
+- **⚡ Hardened Runtime Resilience & Automatic Process Recovery**:
+  - Enhanced loop monitor (`engine/loop_monitor.py`) detects stalled turns, unhandled exceptions, and orphaned CLI processes with automatic recovery.
+  - Resilient SQLite event sourcing with transactional durability across engine restarts and multi-client connections.
+- **🔄 Multi-Account Google OAuth Pool & Failover Management**:
+  - Intelligent credential lease serialization and quota fallback (`core/auth_pool.py`) across registered Google accounts (`account_01`, `account_02`, `account_04`).
+  - Seamless support for `gemini-3.8-flash-high` and `claude-opus-4-6-thinking` with per-account quota isolation.
+- **🧪 Comprehensive Test Suite & Multimodal Expansion**:
+  - Expanded test coverage (`tests/`) including auth pool recovery, watchdog brains, telegram lifecycle, and backend security audits.
+  - New multimodal handling foundation (`core/multimodal.py`) for processing visual diagrams and screenshots.
 
 ---
 
@@ -27,24 +52,27 @@ flowchart TD
         ClaudeDesktop["Claude Desktop"]
         CursorIDE["Cursor IDE"]
         WebBrowser["Web Browser (Studio GUI)"]
+        TelegramUser["Telegram Mobile Client"]
     end
 
     subgraph GatewayLayer["MCP & Gateway Layer"]
         MCPServer["FastMCP Stdio Server<br/>(mcp_server/server.py)"]
         WebStudio["Web Studio & REST Gateway<br/>(FastAPI / Uvicorn)"]
+        TelegramBridge["Telegram Supervisor Bridge<br/>(core/telegram_bridge.py)"]
     end
 
     subgraph CoreLayer["Orchestrator Core"]
         Engine["Orchestrator Engine<br/>(engine/orchestrator.py)"]
         SQLiteStore["SQLite Event Sourcing<br/>(team.sqlite3)"]
         Queues["Task Queues & Loop Monitor"]
-        Heartbeat["Heartbeat & Liveness Tracker"]
+        WatchdogBrain["Watchdog Supervisor Engine<br/>(core/watchdog_brain.py)"]
     end
 
     subgraph TeamHierarchy["Hierarchical Agent Team"]
+        Watchdog["Root Watchdog Agent<br/>(Global Supervisor & Bridge)"]
         CEO["CEO Agent<br/>(Strategic Planning & Architecture)"]
         Manager["Manager Agent<br/>(Milestone Breakdown & Task Dispatch)"]
-        Worker1["Specialist Worker 1<br/>(Packaging / Implementation)"]
+        Worker1["Specialist Worker 1<br/>(Implementation / Code)"]
         Worker2["Specialist Worker 2<br/>(Documentation / QA)"]
     end
 
@@ -67,18 +95,22 @@ flowchart TD
     User --> ClaudeDesktop
     User --> CursorIDE
     User --> WebBrowser
+    TelegramUser <--> TelegramBridge
 
     ClaudeDesktop -->|"stdio MCP"| MCPServer
     CursorIDE -->|"stdio MCP"| MCPServer
     WebBrowser -->|"HTTP / WebSocket"| WebStudio
+    TelegramBridge <--> WatchdogBrain
 
     MCPServer -->|"Engine Actions"| Engine
     WebStudio -->|"REST / Event Streams"| Engine
+    WatchdogBrain <--> Engine
 
     Engine <--> SQLiteStore
     Engine <--> Queues
-    Engine <--> Heartbeat
 
+    Watchdog -.->|"Supervises"| CEO
+    Watchdog -.->|"Supervises"| Manager
     Engine --> CEO
     CEO -->|"Dispatches Roadmap"| Manager
     Manager -->|"Assigns Task"| Worker1
@@ -101,11 +133,12 @@ flowchart TD
 | Feature | Agentic Team MCP | Traditional Multi-Agent Frameworks | Standard MCP Servers |
 | :--- | :--- | :--- | :--- |
 | **Persistence Model** | **Resilient SQLite Event Sourcing** (resumes after restart/crash) | In-memory or ephemeral sessions | Ephemeral (lifetime of stdio pipe) |
-| **Team Hierarchy** | **Strict 3-Tier** (CEO → Manager → Specialists) | Flat peer-to-peer or unstructured swarm | Single-agent tool provider |
+| **Team Hierarchy** | **Strict 3-Tier** (Watchdog → CEO → Manager → Specialists) | Flat peer-to-peer or unstructured swarm | Single-agent tool provider |
 | **Execution Harness** | **Dual Harness** (Native CLI Subprocesses + Direct API) | API-only (HTTP calls) | External tool execution only |
 | **Cost Optimization** | **Subscribed CLI Auth Pools** (Claude Code, Antigravity, Codex) | Per-token commercial billing only | Host application pays per call |
 | **Local-First Security** | **Air-gapped local storage**, zero telemetry, auto key-redaction | Cloud dashboard telemetry & logs | Depends on client implementation |
 | **Real-time Web Studio** | **Full visual canvas**, live terminal streams, process monitors | Static CLI output or paid SaaS dashboard | None (headless) |
+| **Human In The Loop** | **Telegram Mobile Bridge** & Root Watchdog supervision | Webhooks or email alerts | Host client UI only |
 | **Tool Protocol** | **Full Model Context Protocol (MCP)** specification support | Custom proprietary tool schemes | MCP Standard |
 
 ### Highlights
@@ -297,6 +330,10 @@ When connected via MCP, Agentic Team exposes a comprehensive set of orchestratio
 
 ```text
 agentic-team-mcp/
+├── assets/                  # Studio screenshots & preview assets
+│   ├── web_studio_team_floor.png
+│   ├── web_studio_preview.gif
+│   └── web_studio_overview.png
 ├── Launch.cmd               # Fast Windows launcher
 ├── Setup.ps1                # Automated PowerShell virtualenv & dependency setup
 ├── LICENSE                  # MIT License
@@ -304,25 +341,42 @@ agentic-team-mcp/
 ├── requirements.txt         # Core dependencies
 ├── settings.example.json    # Example configuration template
 ├── main.py                  # Main entry point (Web Studio, Engine & MCP Server)
-├── core/                    # Configuration, auth pool, and credentials
+├── core/                    # Core supervisor, telegram bridge, auth pool & config
 │   ├── auth_pool.py         # Multi-account rotation & CLI auth slots
-│   ├── catalog.py          # Dynamic model & harness discovery
-│   ├── config.py           # Pydantic schema validation & redaction
-│   ├── credential_store.py # Secure local credential storage
-│   └── service.py          # Engine lifecycle & process locking
+│   ├── catalog.py           # Dynamic model & harness discovery
+│   ├── config.py            # Pydantic schema validation & redaction
+│   ├── credential_store.py  # Secure local credential storage
+│   ├── multimodal.py        # Visual analysis & image processing
+│   ├── service.py           # Engine lifecycle & process locking
+│   ├── telegram_bridge.py   # Telegram supervisor bridge & alert loop
+│   ├── telegram_supervisor.py # Interactive mobile control endpoints
+│   ├── watchdog_brain.py    # Root Watchdog intelligence & evaluation
+│   └── workspace.py         # Sandboxed workspace directories
 ├── engine/                  # Orchestration core & persistence
-│   ├── actions.py          # Agent action handlers & dispatching
-│   ├── loop_monitor.py     # Stuck-loop detection & runaway turn prevention
-│   ├── orchestrator.py     # Central event loop & agent scheduler
-│   └── store.py            # SQLite event-sourcing database layer
+│   ├── actions.py           # Agent action handlers & dispatching
+│   ├── loop_monitor.py      # Stuck-loop detection & runaway turn prevention
+│   ├── message_router.py    # Priority messaging & event routing
+│   ├── models.py            # Pydantic data models for agents & tasks
+│   ├── orchestrator.py      # Central event loop & agent scheduler
+│   └── store.py             # SQLite event-sourcing database layer
 ├── harness/                 # Subprocess & provider execution harnesses
-│   ├── cli_runner.py       # PTY/pipe adapters for Claude, Antigravity, Codex
-│   └── direct_api.py       # Direct async streaming HTTP API client
+│   ├── cli_runner.py        # PTY/pipe adapters for Claude, Antigravity, Codex
+│   └── direct_api.py        # Direct async streaming HTTP API client
 ├── mcp_server/              # Model Context Protocol stdio server
-│   └── server.py           # FastMCP tool declarations & engine proxy
+│   └── server.py            # FastMCP tool declarations & engine proxy
+├── tests/                   # End-to-end integration & unit test suites
+│   ├── test_auth_pool.py
+│   ├── test_backend_audit.py
+│   ├── test_engine.py
+│   ├── test_google_quota_recovery.py
+│   ├── test_release.py
+│   ├── test_runtime_revision.py
+│   ├── test_service.py
+│   ├── test_telegram_bridge.py
+│   └── test_watchdog_brain.py
 └── web/                     # Web Studio dashboard & REST API
-    ├── app.py              # FastAPI server & WebSocket endpoints
-    └── static/             # Interactive graph, terminal streams, and UI
+    ├── app.py               # FastAPI server & WebSocket endpoints
+    └── static/              # Interactive graph, terminal streams, and UI
 ```
 
 ---

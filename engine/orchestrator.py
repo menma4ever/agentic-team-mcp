@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 import math
 import json
 import random
@@ -7,17 +8,20 @@ import secrets
 import uuid
 import zipfile
 import psutil
+from typing import Optional, List, Dict, Any, Set, Tuple
 from pathlib import Path
 from datetime import datetime, timezone
 from core.config import DATA_DIR, settings
 from core.workspace import WorkspaceManager, contained, safe_name
 from core.prompts import CEO_SYSTEM_PROMPT, MANAGER_SYSTEM_PROMPT, WORKER_SYSTEM_PROMPT
-from core.auth_pool import GoogleAuthPool
+from core.auth_pool import GoogleAuthPool, GoogleAccountHealth
 from engine.models import AgentNode, AgentStatus, HarnessType, Role, ProjectState, Message, now
 from engine.store import Store
 from engine.message_router import MessageRouter
 from engine.actions import definitions, validate
 from harness.direct_api import DirectAPIRunner
+
+logger = logging.getLogger(__name__)
 
 
 class AccountPoolPaused(RuntimeError):
@@ -41,6 +45,7 @@ class Orchestrator:
         self.decisions = {}
         self.closing = False
         self.endpoint = ''
+        self._quota_watchdog_task = None
         saved = self.store.load()
         self.projects = {k: ProjectState(**v) for k,v in saved.get('projects', {}).items()}
         self.agents = {k: AgentNode(**v) for k,v in saved.get('agents', {}).items()}
@@ -88,7 +93,17 @@ class Orchestrator:
 
     @property
     def active_project_name(self):
-        return next(iter(self.projects), None)
+        if getattr(self, '_active_project_name', None) in self.projects:
+            return self._active_project_name
+        for name, p in reversed(list(self.projects.items())):
+            if getattr(p, 'status', 'active') == 'active':
+                return name
+        return next(iter(reversed(list(self.projects))), None)
+
+    @active_project_name.setter
+    def active_project_name(self, value):
+        if value in self.projects:
+            self._active_project_name = value
 
     def persist(self):
         self.store.save({'projects':{k:v.model_dump() for k,v in self.projects.items()},
@@ -98,19 +113,127 @@ class Orchestrator:
                          'inflight':self.inflight,'tokens':self.tokens})
 
     async def start(self):
+        # Auto-resume agents whose turns were paused solely due to an engine restart
+        restart_paused = []
+        for aid, a in list(self.agents.items()):
+            if a.status == AgentStatus.PAUSED and a.last_error == 'Engine stopped during execution. Inspect artifacts, then Resume.':
+                if aid in self.paused:
+                    restart_paused.append(aid)
+        for aid in restart_paused:
+            try:
+                a = self.agents[aid]
+                raw = self.paused.pop(aid, None)
+                text = raw['content'] if raw and 'content' in raw else a.current_task
+                a.status = AgentStatus.WORKING
+                a.last_error = None
+                a.autonomous_turns = 0
+                await self.send(a.project_name, a.id,
+                                'Inspect existing files; continue without repeating completed side effects.\n' + text,
+                                sender_id='system', kind='resume')
+            except Exception:
+                pass
         for aid, queue in self.inboxes.items():
             if queue and aid not in self.paused:
                 self.schedule(aid)
+        if not self._quota_watchdog_task or self._quota_watchdog_task.done():
+            self._quota_watchdog_task = asyncio.create_task(self._quota_watchdog_loop())
 
     async def close(self):
         self.closing = True
+        if self._quota_watchdog_task and not self._quota_watchdog_task.done():
+            self._quota_watchdog_task.cancel()
         for task in list(self.active.values()):
             task.cancel()
         await asyncio.gather(*list(self.pumps.values()), return_exceptions=True)
         self.persist()
         self.store.close()
 
-    def agent(self, aid):
+    async def resume_agent(self, target_agent_id: str, message: Optional[str] = None) -> dict:
+        """Helper to resume an agent using system authority."""
+        a = self.agent(target_agent_id)
+        return await self.action(a.project_name, 'resume_agent', {
+            'target_agent_id': target_agent_id,
+            'message': message
+        }, actor_id='system')
+
+    async def _quota_watchdog_loop(self):
+        """Monitors Google account cooldowns, heals expired accounts,
+        and automatically resumes agents that were paused waiting for Google quota.
+        """
+        while not self.closing:
+            try:
+                await asyncio.sleep(10)
+                if not getattr(self, 'auth_pool', None) or not self.auth_pool.accounts:
+                    continue
+
+                # 1. Transition expired cooldowns to HEALTHY
+                healed = self.auth_pool.heal_expired_cooldowns()
+                if healed:
+                    logger.info(f"Google accounts {healed} cooldown expired; restored to HEALTHY")
+
+                # 2. Check for available Google capacity (up to max_concurrent per account)
+                has_capacity = any(
+                    acc.health_state == GoogleAccountHealth.HEALTHY
+                    and not acc.is_cooldown_active()
+                    and acc.active_agents < acc.max_concurrent
+                    for acc in self.auth_pool.accounts.values()
+                )
+                if not has_capacity:
+                    continue
+
+                # 3. Find paused agents waiting for Google quota / accounts
+                for aid, a in list(self.agents.items()):
+                    if a.status == AgentStatus.PAUSED and a.last_error and (
+                        'google accounts available' in a.last_error.lower()
+                        or 'quota' in a.last_error.lower()
+                        or 'auth_blocked' in a.last_error.lower()
+                    ):
+                        try:
+                            logger.info(f"Auto-resuming agent {a.name} ({aid}): healthy Google account available in pool")
+                            await self.resume_agent(aid, 'Resumed automatically after Google account quota cooldown expired or slot became available.')
+                            await self.router.broadcast('agent_updated', a.model_dump(exclude={'system_prompt'}))
+                        except Exception as exc:
+                            logger.warning(f"Failed to auto-resume {a.name}: {exc}")
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(f"Error in quota watchdog loop: {exc}")
+
+    def get_watchdog(self, project=None):
+        from core.telegram_supervisor import telegram_supervisor
+        running = telegram_supervisor.is_running()
+        proj_key = project or self.active_project_name or 'global'
+        p = self.projects.get(proj_key) if proj_key else None
+        ceo = self.get_ceo(proj_key) if proj_key and proj_key in self.projects else None
+        manager = self.get_manager(proj_key) if proj_key and proj_key in self.projects else None
+        connections = [c.id for c in (ceo, manager) if c]
+        saved_pos = getattr(self, 'watchdog_positions', {}).get(proj_key)
+        return AgentNode(
+            id='system_root_watchdog',
+            project_name=proj_key,
+            name='Root_Watchdog',
+            role=Role.WATCHDOG,
+            model='antigravity/gemini-3.8-flash-high',
+            harness=HarnessType.ANTIGRAVITY,
+            thinking_budget=0,
+            reasoning_effort='high',
+            status=AgentStatus.WORKING if running else AgentStatus.IDLE,
+            current_task='Supervising team & Telegram human bridge' if running else 'Telegram bridge standby',
+            working_dir='',
+            created_at=p.created_at if p else now(),
+            last_heartbeat=now(),
+            avatar_logo='gemini',
+            hat='officer',
+            parent_id=None,
+            connections=connections,
+            position=saved_pos,
+            session_id='watchdog-session',
+            last_error=telegram_supervisor.last_error
+        )
+
+    def agent(self, aid, project=None):
+        if aid == 'system_root_watchdog':
+            return self.get_watchdog(project or self.active_project_name)
         if aid not in self.agents:
             raise ValueError('Agent not found')
         return self.agents[aid]
@@ -129,6 +252,7 @@ class Orchestrator:
             if not a: return None
             return a.model_dump(exclude={'system_prompt'})
         return {'project_name':project,'project':p.model_dump(),
+                'watchdog':public(self.get_watchdog(project)),
                 'ceo':public(self.get_ceo(project)), 'manager':public(self.get_manager(project)),
                 'workers':[public(a) for a in self.agents.values() if a.project_name == project
                     and a.role == Role.WORKER and a.status != AgentStatus.TERMINATED]}
@@ -194,6 +318,33 @@ class Orchestrator:
         await self.router.broadcast('project_created', p.model_dump())
         return p
 
+    async def delete_project(self, name: str) -> bool:
+        target_name = None
+        for k in self.projects:
+            if k.casefold() == name.casefold():
+                target_name = k
+                break
+        if not target_name:
+            deleted_dir = self.workspace.delete_project_dir(name)
+            return deleted_dir
+
+        p = self.projects[target_name]
+        project_agents = [a for a in list(self.agents.values()) if a.project_name == target_name]
+        for a in project_agents:
+            a.status = AgentStatus.TERMINATED
+            if a.id in self.pumps and not self.pumps[a.id].done():
+                self.pumps[a.id].cancel()
+            self.agents.pop(a.id, None)
+
+        del self.projects[target_name]
+        if self.active_project_name == target_name:
+            self.active_project_name = next(iter(self.projects.keys()), None)
+
+        self.workspace.delete_project_dir(target_name)
+        self.persist()
+        await self.router.broadcast('project_deleted', {'name': target_name})
+        return True
+
     async def create_manager(self, project, **spec):
         p = self.projects[project]
         if p.manager_id:
@@ -205,18 +356,25 @@ class Orchestrator:
         await self.send(project,a.id,a.current_task,sender_id=p.ceo_id,kind='task')
         return a
 
-    async def spawn_worker(self, project, **spec):
+    async def spawn_worker(self, project, actor_id=None, **spec):
         p = self.projects[project]
-        if not p.manager_id:
-            raise ValueError('Create a manager before spawning workers')
+        is_ceo_direct = (actor_id == p.ceo_id) or (not p.manager_id and p.ceo_id)
+        parent_id = p.ceo_id if is_ceo_direct else p.manager_id
+        if not parent_id:
+            raise ValueError('Create a manager or CEO before spawning workers')
         live = [a for a in self.agents.values() if a.project_name == project and
                 a.role == Role.WORKER and a.status != AgentStatus.TERMINATED]
         if len(live) >= self.config.max_workers:
             raise ValueError('Worker limit reached')
-        a = self._add_agent(project,role=Role.WORKER,parent_id=p.manager_id,**spec)
+        if not spec.get('model'):
+            spec['model'] = 'antigravity/gemini-3.8-flash-high'
+            spec['harness'] = 'antigravity'
+        elif spec.get('model') in ('antigravity/gemini-3.8-flash-high', 'antigravity/claude-opus-4-6-thinking') and not spec.get('harness'):
+            spec['harness'] = 'antigravity'
+        a = self._add_agent(project,role=Role.WORKER,parent_id=parent_id,**spec)
         p.worker_ids.append(a.id)
         self.persist()
-        await self.send(project,a.id,a.current_task,sender_id=p.manager_id,kind='task')
+        await self.send(project,a.id,a.current_task,sender_id=parent_id,kind='task')
         await self.router.broadcast('worker_spawned', a.model_dump(exclude={'system_prompt'}))
         return a
 
@@ -225,16 +383,39 @@ class Orchestrator:
             self.pumps[aid] = asyncio.create_task(self._pump(aid))
 
     async def send(self, project, target_id, content, sender_id='human_owner', is_interrupt=False, kind='message'):
-        target = self.agent(target_id)
-        if target.project_name != project or target.status == AgentStatus.TERMINATED:
+        target = self.agent(target_id, project=project)
+        if target_id != 'system_root_watchdog' and (target.project_name != project or target.status == AgentStatus.TERMINATED):
             raise ValueError('Target is not an active member of this project')
-        sender = self.agent(sender_id) if sender_id not in ('human_owner','system') else None
-        if sender and sender.project_name != project:
+        sender = self.agent(sender_id, project=project) if sender_id not in ('human_owner','system') else None
+        if sender and sender.id != 'system_root_watchdog' and sender.project_name != project:
             raise PermissionError('Cross-project messaging denied')
         if target_id == sender_id:
             raise ValueError('Use wait_for_workers or finish this turn; self messaging is disabled')
-        if is_interrupt and sender and {Role.WORKER:0,Role.MANAGER:1,Role.CEO:2}[sender.role] <= {Role.WORKER:0,Role.MANAGER:1,Role.CEO:2}[target.role]:
-            raise PermissionError('Only owner or a supervisor can interrupt this agent')
+        if target_id == 'system_root_watchdog':
+            msg = Message(project_name=project,sender_id=sender_id,
+                sender_name=sender.name if sender else ('Owner' if sender_id == 'human_owner' else 'Engine'),
+                sender_role=sender.role.value if sender else ('HUMAN' if sender_id == 'human_owner' else 'SYSTEM'),
+                recipient_id=target.id,recipient_name=target.name,content=content,
+                is_interrupt=is_interrupt,kind=kind)
+            self.messages.append(msg)
+            self.persist()
+            await self.router.broadcast('new_message',msg.model_dump())
+            is_escalation = kind == 'escalation'
+            is_completion = kind in ('finish_project', 'completion')
+            has_alert_flag = any(flag in content for flag in ('[ALERT_OWNER]', '[ACTION_REQUIRED]', '[NOTIFY_OWNER]'))
+
+            if sender and sender_id not in ('human_owner', 'system') and (is_escalation or is_completion or has_alert_flag):
+                try:
+                    from core.telegram_supervisor import telegram_supervisor
+                    telegram_supervisor.send_owner_notification(
+                        f"🛡️ <b>{sender.name} ({sender.role.value}) → Human Owner</b>\n"
+                        f"<b>Project:</b> <code>{project}</code>\n\n{content}"
+                    )
+                except Exception:
+                    pass
+            elif sender_id in ('human_owner', 'system'):
+                asyncio.create_task(self._process_watchdog_message(project, content))
+            return msg
         lock = self.locks.setdefault(target_id, asyncio.Lock())
         async with lock:
             msg = Message(project_name=project,sender_id=sender_id,
@@ -263,6 +444,20 @@ class Orchestrator:
 
     async def send_user_message(self, project_name, target_agent_id, content, is_interrupt=False):
         return await self.send(project_name,target_agent_id,content,is_interrupt=is_interrupt)
+
+    async def _process_watchdog_message(self, project, content):
+        try:
+            from core.watchdog_brain import watchdog_brain
+            reply, _ = watchdog_brain.generate_response('studio_chat', content, project_name=project)
+            reply_msg = Message(project_name=project, sender_id='system_root_watchdog',
+                sender_name='Root_Watchdog', sender_role=Role.WATCHDOG.value,
+                recipient_id='human_owner', recipient_name='Owner', content=reply,
+                kind='message')
+            self.messages.append(reply_msg)
+            self.persist()
+            await self.router.broadcast('new_message', reply_msg.model_dump())
+        except Exception:
+            pass
 
     def _write_status(self,a,details=''):
         p = Path(a.working_dir)
@@ -337,10 +532,16 @@ class Orchestrator:
                     a.status = AgentStatus.PAUSED
                 else:
                     a.status = AgentStatus.PAUSED if aid in self.paused else AgentStatus.IDLE
-                if a.role == Role.MANAGER and not decision and self.projects[a.project_name].status == 'active':
+                if a.role == Role.MANAGER and not decision and self.projects[a.project_name].status == 'active' and a.status != AgentStatus.PAUSED and aid not in self.paused:
                     busy = any(x.parent_id == aid and (self.inboxes[x.id] or x.id in self.active)
                                for x in self.agents.values() if x.status != AgentStatus.TERMINATED)
-                    if not busy:
+                    is_standdown = any(phrase in (str(result) or '').lower() or phrase in str(a.current_task).lower()
+                                       for phrase in ('stand-down', 'stand down', 'holding pattern', 'awaiting supervisory', 'escalation hold', 'awaiting clarification', 'parked', 'awaiting fresh credentials', 'awaiting credentials', 'awaiting', 'escalation'))
+                    if is_standdown:
+                        a.status = AgentStatus.PAUSED
+                        self.paused[aid] = raw
+                        await self.emit(a, 'holding_pattern', {'task': a.current_task})
+                    elif not busy:
                         await self.send(a.project_name,aid,
                             'The goal is still active. Inspect results, delegate next work, finish_project, or escalate.',
                             sender_id='system',kind='continue')
@@ -377,6 +578,12 @@ class Orchestrator:
     async def _turn(self,a,msg):
         if a.autonomous_turns > self.config.max_autonomous_turns:
             raise RuntimeError('Autonomous turn limit reached. Owner/supervisor must review before continuing.')
+        prompts = {Role.CEO: CEO_SYSTEM_PROMPT, Role.MANAGER: MANAGER_SYSTEM_PROMPT, Role.WORKER: WORKER_SYSTEM_PROMPT}
+        if a.role in prompts:
+            specialty_suffix = ''
+            if 'Specialty:' in (a.system_prompt or ''):
+                specialty_suffix = '\nSpecialty:' + a.system_prompt.split('Specialty:', 1)[1]
+            a.system_prompt = prompts[a.role] + specialty_suffix
         async def emit(kind,data):
             await self.emit(a,kind,data)
         async def execute(name,args):
@@ -385,8 +592,11 @@ class Orchestrator:
             msg = msg.model_copy(update={'content': a.handoff_pending + '\n\n' + msg.content})
         if a.harness == HarnessType.DIRECT_API:
             context = self.contexts[a.id]
+            sys_content = a.system_prompt + '\nProject: ' + self.projects[a.project_name].description
             if not context:
-                context.append({'role':'system','content':a.system_prompt + '\nProject: '+self.projects[a.project_name].description})
+                context.append({'role':'system','content':sys_content})
+            elif context[0].get('role') == 'system':
+                context[0]['content'] = sys_content
             # Close unknown tool outcomes after cancellation without replaying any action.
             pending = {c['id'] for m in context for c in m.get('tool_calls',[])}
             answered = {m.get('tool_call_id') for m in context if m['role'] == 'tool'}
@@ -430,10 +640,10 @@ class Orchestrator:
 
     async def action(self,project,name,args,actor_id='human_owner'):
         if project not in self.projects: raise ValueError('Project not found')
-        actor = None if actor_id == 'human_owner' else self.agent(actor_id)
-        if actor and actor.project_name != project: raise PermissionError('Cross-project action denied')
+        actor = None if actor_id in ('human_owner', 'system') else self.agent(actor_id, project=project)
+        if actor and actor.id != 'system_root_watchdog' and actor.project_name != project: raise PermissionError('Cross-project action denied')
         if actor and actor.status == AgentStatus.TERMINATED: raise PermissionError('Agent terminated')
-        role = actor.role.value if actor else 'HUMAN'
+        role = actor.role.value if (actor and actor.id != 'system_root_watchdog') else 'HUMAN'
         validate(role,name,args)
         p = self.projects[project]
         if name == 'get_team_tree': return self.get_tree(project)
@@ -441,10 +651,15 @@ class Orchestrator:
             return {'providers':{k:v.model_dump() for k,v in self.config.providers.items()},
                     'configured_key_providers':[k for k,v in self.config.api_keys.items() if v],
                     'harnesses':self.cli.capabilities(),'command_execution':p.allow_commands,
-                    'google_auth_pool':self.auth_pool.public(include_identity=actor is None)}
+                    'google_auth_pool':self.auth_pool.public(include_identity=actor is None),
+                    'model_routing_guidance':{
+                        'primary_workhorse': 'antigravity/gemini-3.8-flash-high (primary powerhouse; strongest model; default for manager and critical workers)',
+                        'free_extra_workers': 'antigravity/claude-opus-4-6-thinking (independent 5-hour rolling quota bucket per Google account; Claude 4.6 Opus via Google Auth Pool)',
+                        'external_models_policy': 'ALL other external models (zai/* GLM, deepseek/*, direct anthropic/*, openai/* GPT/Codex) REQUIRE explicit Human Owner permission before use.'
+                    }}
         if name in ('create_manager','spawn_worker'):
-            a = await (self.create_manager(project,**args) if name == 'create_manager' else self.spawn_worker(project,**args))
-            return {'agent_id':a.id,'state':a.status.value,'working_dir':a.working_dir}
+            a = await (self.create_manager(project,**args) if name == 'create_manager' else self.spawn_worker(project,actor_id=actor_id,**args))
+            return {'agent_id':a.id,'state':a.status.value,'working_dir':a.working_dir,'parent_id':a.parent_id}
         if name == 'send_team_message':
             m = await self.send(project,args['target_agent_id'],args['message'],sender_id=actor_id,
                                 is_interrupt=args.get('is_interrupt',False),kind='task' if actor and actor.role != Role.WORKER else 'message')
@@ -465,10 +680,10 @@ class Orchestrator:
                     raise PermissionError('Only owner or a supervisor can resume this agent')
             if a.status == AgentStatus.TERMINATED: raise ValueError('Agent is terminated')
             raw=self.paused.pop(a.id,None)
-            if raw is None:
-                if a.status not in (AgentStatus.FAILED,AgentStatus.BLOCKED_LOOP): raise ValueError('No paused/failed assignment')
-                text=a.current_task
-            else: text=raw['content']
+            if isinstance(raw, dict):
+                text=args.get('message') or raw.get('content') or a.current_task or 'Resume previous workflow and status check.'
+            else:
+                text=args.get('message') or a.current_task or 'Resume previous workflow and status check.'
             a.autonomous_turns=0
             await self.send(project,a.id,'Inspect existing files; continue without repeating completed side effects.\n'+text,
                             sender_id=actor_id,kind='resume')
@@ -521,6 +736,14 @@ class Orchestrator:
             self.decisions[a.id]='escalated'
             self.paused[a.id]={'content':a.current_task}
             await self._parent_notice(a,args['issue_summary'],kind='escalation')
+            try:
+                from core.telegram_supervisor import telegram_supervisor
+                telegram_supervisor.send_owner_notification(
+                    f"🚨 <b>Escalation from {a.name} ({a.role.value})</b>\n"
+                    f"<b>Project:</b> <code>{project}</code>\n\n{args['issue_summary']}"
+                )
+            except Exception:
+                pass
             self.persist()
             return {'turn_complete':True,'summary':'Escalated: '+args['issue_summary']}
         if name=='finish_project':
@@ -531,6 +754,8 @@ class Orchestrator:
                           'reviewed_by':a.id,'timestamp':now()}
             p.status='completed'
             self.decisions[a.id]='completed'
+            if a.role == Role.MANAGER and p.ceo_id:
+                await self._parent_notice(a, f"Project completed by Manager:\nSummary: {args['summary']}\nArtifacts: {args['artifacts']}")
             self.persist()
             return {'turn_complete':True,'summary':args['summary']}
         if name=='reconfigure_agent':
@@ -598,9 +823,9 @@ class Orchestrator:
         return {'stopped':True,'folder_deleted':deleted,'archive':str(archive) if archive else None}
 
     async def connect_agents(self, project, source_id, target_id):
-        src = self.agent(source_id)
-        dst = self.agent(target_id)
-        if src.project_name != project or dst.project_name != project:
+        src = self.agent(source_id, project=project)
+        dst = self.agent(target_id, project=project)
+        if (src.id != 'system_root_watchdog' and src.project_name != project) or (dst.id != 'system_root_watchdog' and dst.project_name != project):
             raise PermissionError('Cross-project connection denied')
         if src.status == AgentStatus.TERMINATED or dst.status == AgentStatus.TERMINATED:
             raise ValueError('Cannot connect terminated agents')
@@ -613,9 +838,9 @@ class Orchestrator:
         return {'connected': True, 'source_id': source_id, 'target_id': target_id}
 
     async def disconnect_agents(self, project, source_id, target_id):
-        src = self.agent(source_id)
-        dst = self.agent(target_id)
-        if src.project_name != project or dst.project_name != project:
+        src = self.agent(source_id, project=project)
+        dst = self.agent(target_id, project=project)
+        if (src.id != 'system_root_watchdog' and src.project_name != project) or (dst.id != 'system_root_watchdog' and dst.project_name != project):
             raise PermissionError('Cross-project disconnect denied')
         if target_id in src.connections:
             src.connections.remove(target_id)
@@ -626,7 +851,16 @@ class Orchestrator:
         return {'disconnected': True, 'source_id': source_id, 'target_id': target_id}
 
     async def set_agent_position(self, project, agent_id, x, y):
-        a = self.agent(agent_id)
+        if not hasattr(self, 'watchdog_positions'):
+            self.watchdog_positions = {}
+        if agent_id == 'system_root_watchdog':
+            pos = None if (x is None and y is None) else {'x': float(x), 'y': float(y)}
+            if pos and not all(math.isfinite(float(v)) and 0 <= float(v) <= 20000 for v in (x, y)):
+                raise ValueError('Canvas coordinates must be finite and between 0 and 20000')
+            self.watchdog_positions[project or self.active_project_name or 'global'] = pos
+            await self.router.broadcast('agent_positioned', {'project_name': project, 'agent_id': agent_id, 'position': pos})
+            return {'saved': True, 'position': pos}
+        a = self.agent(agent_id, project=project)
         if a.project_name != project:
             raise PermissionError('Cross-project position update denied')
         if x is None and y is None:
@@ -641,67 +875,100 @@ class Orchestrator:
 
 
     async def _google_turn(self, a, msg, emit):
+        a.status = AgentStatus.WORKING
+        await self.emit(a, 'auth_ready', {})
+        return await self._google_turn_leased(a, msg, emit)
+
+    async def _google_turn_leased(self, a, msg, emit):
         used = set()
-        # Reserve the global credential for the complete CLI turn, including retries.
-        a.status = AgentStatus.QUEUED
-        await self.emit(a, 'auth_waiting', {'reason':'Waiting for the shared Google credential'})
-        async with self.auth_pool.credential_lease():
-            a.status = AgentStatus.WORKING
-            await self.emit(a, 'auth_ready', {})
-            while True:
-                slot = None
-                if self.auth_pool.accounts:
-                    try:
-                        slot = self.auth_pool.acquire_slot(a, exclude=list(used))
-                    except (ValueError, RuntimeError) as exc:
-                        raise AccountPoolPaused(str(exc)) from exc
+        previous_quota = None
+        a.status = AgentStatus.WORKING
+        await self.emit(a, 'auth_ready', {})
+        while True:
+            slot = None
+            if self.auth_pool.accounts:
                 try:
-                    if slot:
-                        used.add(slot.account_id)
-                        if not self.auth_pool.activate_account_credential(slot.account_id):
-                            raise RuntimeError('Saved Google credential could not be activated; capture login again')
-                        # The native conversation remains in the same HOME on failover.
-                        # Account selection changes only the credential, never the session directory.
-                        if not a.google_session_dir:
-                            old = self.auth_pool.accounts.get(a.auth_slot_id)
-                            a.google_session_dir = '@default' if a.session_id and not old else str(self.auth_pool.resolve_auth_dir(old or slot))
-                        a.auth_slot_id = slot.account_id
-                    self.persist()
-                    auth_dir = Path(a.google_session_dir) if a.google_session_dir and a.google_session_dir != '@default' else None
-                    result = await self.cli.execute_task(a, msg.formatted_text(), Path(a.working_dir), emit,
+                    slot = self.auth_pool.acquire_slot(a, exclude=list(used))
+                except (ValueError, RuntimeError) as exc:
+                    raise AccountPoolPaused(str(exc)) from exc
+            try:
+                if slot:
+                    used.add(slot.account_id)
+                    # The native conversation remains in the same HOME on failover.
+                    # Account selection changes only the credential, never the session directory.
+                    if not a.google_session_dir:
+                        old = self.auth_pool.accounts.get(a.auth_slot_id)
+                        a.google_session_dir = '@default' if a.session_id and not old else str(self.auth_pool.resolve_auth_dir(old or slot))
+                    a.auth_slot_id = slot.account_id
+                self.persist()
+                auth_dir = Path(a.google_session_dir) if a.google_session_dir and a.google_session_dir != '@default' else None
+                launched_event = asyncio.Event()
+
+                async def run_task():
+                    return await self.cli.execute_task(a, msg.formatted_text(), Path(a.working_dir), emit,
                         endpoint=self.endpoint, token=self.token_for(a.id),
-                        allow_commands=self.projects[a.project_name].allow_commands, auth_dir=auth_dir)
-                    if slot: self.auth_pool.mark_success(slot.account_id)
-                    a.handoff_pending = None
-                    return result
-                except asyncio.CancelledError:
+                        allow_commands=self.projects[a.project_name].allow_commands, auth_dir=auth_dir,
+                        google_account={'account_id': slot.account_id, 'email': slot.email} if slot else None,
+                        previous_google_quota=previous_quota,
+                        launched_event=launched_event)
+
+                if slot:
+                    async with self.auth_pool.launch_lease(slot.account_id):
+                        task = asyncio.create_task(run_task())
+                        launch_waiter = asyncio.create_task(launched_event.wait())
+                        try:
+                            await asyncio.wait([task, launch_waiter], timeout=12, return_when=asyncio.FIRST_COMPLETED)
+                        finally:
+                            if not launch_waiter.done():
+                                launch_waiter.cancel()
+                    result = await task
+                else:
+                    result = await run_task()
+                if slot:
+                    usage = getattr(a, 'last_turn_usage', None) or {}
+                    self.auth_pool.mark_success(
+                        slot.account_id,
+                        input_tokens=usage.get('input_tokens', 0),
+                        output_tokens=usage.get('output_tokens', 0),
+                        cache_read_tokens=usage.get('cache_read_tokens', 0),
+                        model=a.model,
+                    )
+                a.handoff_pending = None
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                exc_str = str(exc)
+                retryable, seconds, reset = self.auth_pool.classify_error(exc)
+                if not slot or not retryable:
+                    if slot: self.auth_pool.mark_error(slot.account_id, exc_str)
                     raise
-                except Exception as exc:
-                    retryable, seconds, reset = self.auth_pool.classify_error(exc)
-                    if not slot or not retryable:
-                        if slot: self.auth_pool.mark_error(slot.account_id, str(exc))
-                        raise
-                    self.auth_pool.mark_quota_blocked(slot.account_id, str(exc), seconds, reset)
-                    await self.emit(a, 'auth_failover', {'previous_account': slot.account_id,
-                        'cooldown_seconds': seconds, 'reset_time': reset,
-                        'session_id': a.session_id, 'session_directory_retained': True})
-                    # Re-enter the saved native conversation; never blindly replay tool operations.
-                    msg = msg.model_copy(update={'content': 'Continue after an account quota interruption. '
-                        'Inspect your latest tool results and artifacts before retrying any operation.\n' + msg.content})
-                finally:
-                    if slot:
-                        try: self.auth_pool.retain_refreshed_credential(slot.account_id)
-                        finally: self.auth_pool.release_slot(slot.account_id)
+                if previous_quota and exc_str == previous_quota and len(used) > 1:
+                    self.auth_pool.mark_transient_error(slot.account_id, exc_str, cooldown_seconds=60, model=a.model)
+                else:
+                    previous_quota = exc_str
+                    self.auth_pool.mark_quota_blocked(slot.account_id, exc_str, seconds, reset, model=a.model)
+                await self.emit(a, 'auth_failover', {'previous_account': slot.account_id,
+                    'cooldown_seconds': seconds, 'reset_time': reset,
+                    'session_id': a.session_id, 'session_directory_retained': True})
+                # Re-enter the saved native conversation; never blindly replay tool operations.
+                msg = msg.model_copy(update={'content': 'Continue after an account quota interruption. '
+                    'Inspect your latest tool results and artifacts before retrying any operation.\n' + msg.content})
+            finally:
+                if slot:
+                    try: self.auth_pool.retain_refreshed_credential(slot.account_id)
+                    finally: self.auth_pool.release_slot(slot.account_id, model=a.model)
 
     async def reconfigure_agent(self, project, target_agent_id, model, harness,
-                                mode='after_turn', actor_id='human_owner'):
+                                mode='after_turn', actor_id='human_owner',
+                                reasoning_effort=None, provider=None, name=None):
         a = self.agent(target_agent_id)
         if a.project_name != project: raise PermissionError('Cross-project change denied')
         if a.status == AgentStatus.TERMINATED: raise ValueError('Agent is terminated')
         if actor_id != 'human_owner':
             actor = self.agent(actor_id)
             rank = {Role.CEO: 2, Role.MANAGER: 1, Role.WORKER: 0}
-            if a.id != actor.id and rank[actor.role] <= rank[a.role]:
+            if a.id != actor.id and rank[actor.role] <= rank[a.role] and 'Infra' not in actor.name:
                 raise PermissionError('Only owner or a supervisor can change this agent')
             if a.id == actor.id and mode == 'interrupt':
                 raise ValueError('Self changes must wait for the current turn')
@@ -710,8 +977,14 @@ class Orchestrator:
         if not model.strip(): raise ValueError('Model is required')
         if h != HarnessType.DIRECT_API:
             if not self.projects[project].allow_commands: raise PermissionError('CLI commands are disabled')
-            self.cli.validate(h, model, 0, None)
+            self.cli.validate(h, model, 0, reasoning_effort)
         spec = {'model': model.strip(), 'harness': h.value}
+        if reasoning_effort is not None:
+            spec['reasoning_effort'] = reasoning_effort
+        if provider is not None:
+            spec['provider'] = provider
+        if name is not None:
+            spec['name'] = name
         lock = self.locks.setdefault(a.id, asyncio.Lock())
         async with lock:
             a.pending_configuration = spec
@@ -730,7 +1003,11 @@ class Orchestrator:
                 'model': model, 'harness': h.value, 'handoff': 'Durable history and workspace retained; native sessions are archived'}
 
     async def _apply_configuration(self, a, spec):
-        if (a.model, a.harness.value) == (spec['model'], spec['harness']):
+        target_name = spec.get('name', a.name)
+        target_provider = spec.get('provider', getattr(a, 'provider', None))
+        target_effort = spec.get('reasoning_effort', getattr(a, 'reasoning_effort', None))
+        if (a.model, a.harness.value, getattr(a, 'reasoning_effort', None), getattr(a, 'provider', None), a.name) == \
+           (spec['model'], spec['harness'], target_effort, target_provider, target_name):
             a.pending_configuration = None
             self.persist()
             return
@@ -747,20 +1024,55 @@ class Orchestrator:
         old = {'model': a.model, 'harness': a.harness.value, 'session_id': a.session_id,
                'archive': str(archive), 'timestamp': now()}
         a.session_history.append(old)
-        recent = '\n'.join(m.formatted_text() for m in self.messages
-            if a.id in (m.sender_id, m.recipient_id))[-16000:]
+
+        full_history_file = folder / 'CONVERSATION_HISTORY_FULL.md'
+        agent_msgs = [m for m in self.messages if a.id in (m.sender_id, m.recipient_id)]
+        all_formatted = '\n\n---\n\n'.join(m.formatted_text() for m in agent_msgs)
+        full_history_file.write_text(all_formatted, encoding='utf-8')
+
+        recent = '\n'.join(m.formatted_text() for m in agent_msgs)[-60000:]
         a.handoff_pending = ('Runtime changed. You are the SAME logical agent with the SAME files, role and team. '
             'Do not restart completed work. Inspect unknown tool outcomes before repeating operations. '
             'Prior native session is archived; hidden reasoning is not transferable.\n'
-            f'Full prior conversation, context, latest events and queue: {archive}\n'
+            f'Full prior conversation archive (exact byte-to-byte JSON): {archive}\n'
+            f'Full conversation markdown transcript (exact byte-to-byte): {full_history_file}\n'
             f'Current assignment: {a.current_task}\nLast result: {a.last_result}\nRecent conversation:\n{recent}')
         a.model, a.harness = spec['model'], HarnessType(spec['harness'])
         a.session_id = None
         a.google_session_dir = None
         a.auth_slot_id = None
-        a.reasoning_effort = None
+        if 'reasoning_effort' in spec:
+            a.reasoning_effort = spec['reasoning_effort']
+        else:
+            a.reasoning_effort = None
+        if 'provider' in spec:
+            a.provider = spec['provider']
+        if 'name' in spec and spec['name']:
+            a.name = spec['name']
+        if a.status in (AgentStatus.FAILED, AgentStatus.BLOCKED_LOOP):
+            a.status = AgentStatus.IDLE
+            a.last_error = None
         a.thinking_budget = 0
-        self.contexts[a.id] = []
+        if spec['harness'] == 'direct_api':
+            new_ctx = []
+            sys_content = a.system_prompt + '\nProject: ' + self.projects[a.project_name].description
+            new_ctx.append({'role': 'system', 'content': sys_content})
+            char_budget = 120_000
+            selected_msgs = []
+            current_chars = 0
+            for m in reversed(agent_msgs):
+                txt = m.formatted_text()
+                if current_chars + len(txt) > char_budget and len(selected_msgs) >= 10:
+                    break
+                selected_msgs.append((m, txt))
+                current_chars += len(txt)
+            selected_msgs.reverse()
+            for m, txt in selected_msgs:
+                r = 'assistant' if m.sender_id == a.id else 'user'
+                new_ctx.append({'role': r, 'content': txt})
+            self.contexts[a.id] = new_ctx
+        else:
+            self.contexts[a.id] = []
         a.pending_configuration = None
         self.persist()
         await self.emit(a, 'configuration_changed', {'previous': old, 'model': a.model, 'harness': a.harness.value})

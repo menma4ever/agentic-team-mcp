@@ -135,9 +135,23 @@ $('cancel-google-login').onclick=guard(async()=>{await api('/api/auth/google/can
 
 api('/health').then(health=>{
  engineRevision=health.studio_revision||0;
+ window.engineRevision=engineRevision;
  if(engineRevision<2){
   $('open-console').disabled=true;$('open-console').textContent='PowerShell · update pending';
   const note=el('div','Backend update prepared. Current agents continue on the existing engine.','upgrade-note');
   document.querySelector('.app-header').after(note);
  }
 }).catch(()=>{});
+
+const toggleHandoffsBtn = $('toggle-handoffs');
+if(toggleHandoffsBtn){
+  const isHidden = localStorage.getItem('agentic_team_handoffs_collapsed') === 'true';
+  $('flow-feed').hidden = isHidden;
+  toggleHandoffsBtn.textContent = isHidden ? 'Expand ↗' : 'Collapse ▾';
+  toggleHandoffsBtn.onclick = () => {
+    const nextHidden = !$('flow-feed').hidden;
+    $('flow-feed').hidden = nextHidden;
+    toggleHandoffsBtn.textContent = nextHidden ? 'Expand ↗' : 'Collapse ▾';
+    localStorage.setItem('agentic_team_handoffs_collapsed', nextHidden ? 'true' : 'false');
+  };
+}

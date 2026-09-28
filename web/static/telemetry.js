@@ -13,8 +13,9 @@ function normalize(u,kind){
   if(!(input||output||cache||write))return null;
   return {input,output,cache,write};
 }
+const canonModel=m=>m?String(m).trim().toLowerCase().replace(/\s+/g,'-').split('/').pop():null;
 class Ledger{
- constructor(){this.cursor=-1;this.buffers=new Map();this.samples=new Map();this.activity=[];this.seen=new Set();this.estimated=new Map();this.stepText=new Map();this.raw=[];this.lastTime=null;this.geminiTotals=new Map();this.geminiFinalSteps=new Set();this.geminiSteps=new Map();}
+ constructor(){this.cursor=-1;this.buffers=new Map();this.samples=new Map();this.activity=[];this.seen=new Set();this.estimated=new Map();this.stepText=new Map();this.raw=[];this.lastTime=null;this.geminiTotals=new Map();this.geminiFinalSteps=new Set();this.geminiSteps=new Map();this.codexTotals=new Map();this.activeThreadId=null;}
  addActivity(type,text,e,key){
   if(!text)return;
   if(key){const old=this.activity.find(x=>x.key===key);if(old){old.text=text;old.time=e.timestamp;old.run=e.run_id||'legacy';return;}}
@@ -49,8 +50,24 @@ class Ledger{
    for(const c of (Array.isArray(d.message?.content)?d.message.content:[]))if(c.type==='tool_result')this.addActivity(c.is_error?'error':'tool result',typeof c.content==='string'?c.content:JSON.stringify(c.content,null,2),e,c.tool_use_id+':result');
   }else if(type==='item.started'||type==='item.completed'||type==='item.updated'){
    const i=d.item||{};this.addActivity(i.type||'activity',i.text||[i.command,i.aggregated_output].filter(Boolean).join('\n'),e,run+':'+i.id);
-  }else if(type==='turn.completed')this.usage('turn:'+e.id,d.usage,'openai',e);
-  else if(type==='result'){
+  }else if(type==='thread.started'){
+   if(d.thread_id)this.activeThreadId=d.thread_id;
+  }else if(type==='turn.completed'){
+   // Codex CLI turn.completed reports cumulative thread token usage across resumed turns.
+   const u=normalize(d.usage,'openai');
+   if(u){
+    const threadKey=this.activeThreadId||'codex:'+canonModel(e.model||'default');
+    const prev=this.codexTotals.get(threadKey);
+    const delta={};
+    if(prev&&(u.input||0)>=(prev.input||0)&&(u.output||0)>=(prev.output||0)){
+     for(const k of ['input','output','cache','write'])delta[k]=u[k]===null?null:Math.max(0,u[k]-(prev[k]||0));
+    }else{
+     for(const k of ['input','output','cache','write'])delta[k]=u[k];
+    }
+    this.codexTotals.set(threadKey,u);
+    this.samples.set('codex:'+threadKey+':turn:'+e.id,{...delta,time:e.timestamp,run,model:e.model||null});
+   }
+  }else if(type==='result'){
    if(d.usage)this.usage('summary',d.usage,'anthropic',e,true);
    const p=d.result;
    if(p&&typeof p==='object'){
@@ -89,9 +106,10 @@ class Ledger{
  }
  totals(timeWindowMs=Infinity,model=null,fallback=null){
   const now = Date.now();
+  const targetCanon = model ? canonModel(model) : null;
   const result={input:0,output:0,cache:0,write:0,reported:false,cacheKnown:false,writeKnown:false,estimated:0};
   for(const s of this.samples.values()){
-   if(model&&(s.model||fallback)!==model)continue;
+   if(targetCanon && canonModel(s.model||fallback)!==targetCanon)continue;
    if(timeWindowMs!==Infinity && s.time && (now - Date.parse(s.time)) > timeWindowMs) continue;
    result.reported=true;
    for(const k of ['input','output','cache','write'])result[k]+=s[k]||0;

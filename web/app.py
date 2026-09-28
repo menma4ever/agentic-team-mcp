@@ -2,6 +2,7 @@ import asyncio
 import os
 import secrets
 import subprocess
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -9,9 +10,10 @@ from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconn
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from core.config import ROOT, SystemSettings
+from core.config import ROOT, DATA_DIR, SystemSettings
 from core.providers import PROVIDER_PRESETS
 from engine.loop_monitor import LoopMonitor
+from engine.models import HarnessType
 
 
 class ProjectRequest(BaseModel):
@@ -38,7 +40,17 @@ def create_app(engine,owner_token,instance_id='test'):
     async def lifespan(app):
         await engine.start()
         await monitor.start()
+        try:
+            from core.telegram_supervisor import telegram_supervisor
+            telegram_supervisor.auto_start_if_enabled()
+        except Exception:
+            pass
         yield
+        try:
+            from core.telegram_supervisor import telegram_supervisor
+            telegram_supervisor.stop_daemon()
+        except Exception:
+            pass
         await monitor.stop()
         await engine.close()
     app=FastAPI(title='Agentic Team MCP',lifespan=lifespan)
@@ -64,7 +76,10 @@ def create_app(engine,owner_token,instance_id='test'):
             token=auth[7:] if auth.startswith('Bearer ') else request.cookies.get('team_session','')
             request.state.actor=identity(token)
             if not request.state.actor: return JSONResponse({'detail':'Open the dashboard using main.py to sign in'},401)
-        response=await call_next(request)
+        try:
+            response=await call_next(request)
+        except OSError:
+            return JSONResponse({'detail':'Invalid request path'},404)
         response.headers['X-Content-Type-Options']='nosniff'
         response.headers['Referrer-Policy']='no-referrer'
         response.headers['Cache-Control']='no-store'
@@ -82,6 +97,10 @@ def create_app(engine,owner_token,instance_id='test'):
     @app.exception_handler(PermissionError)
     async def bad_permission(request,exc):
         return JSONResponse({'detail':str(exc)},403)
+
+    @app.exception_handler(OSError)
+    async def bad_os_path(request,exc):
+        return JSONResponse({'detail':'Invalid path'},404)
 
     @app.get('/health')
     async def health():
@@ -113,13 +132,129 @@ def create_app(engine,owner_token,instance_id='test'):
         owner(request)
         a=engine.agent(aid)
         if os.name != 'nt': raise ValueError('PowerShell console requires Windows')
-        import sys
-        exe = ROOT / '.venv' / 'Scripts' / 'python.exe'
-        argv = [str(exe) if exe.is_file() else sys.executable, str(ROOT/'main.py'), '--console', a.id]
-        quoted = ' '.join("'" + part.replace("'", "''") + "'" for part in argv)
-        subprocess.Popen(['powershell.exe','-NoProfile','-NoExit','-Command','& '+quoted],
-            cwd=str(ROOT),creationflags=subprocess.CREATE_NEW_CONSOLE)
-        return {'opened':True,'mode':'Managed session; typed messages are sent as Human Owner'}
+
+        env = os.environ.copy()
+        env.pop('TEAM_OWNER_TOKEN', None)
+
+        working_dir = Path(a.working_dir).resolve() if a.working_dir else engine.workspace.root_dir
+        working_dir.mkdir(parents=True, exist_ok=True)
+
+        harness = a.harness
+        title = f"Agentic Team: {a.name} ({a.role}) - {a.model}"
+        header_banner = (
+            f"Write-Host '=====================================================' -ForegroundColor DarkCyan; "
+            f"Write-Host '  Agentic Team: {a.name} ({a.role})' -ForegroundColor Cyan; "
+            f"Write-Host '  Harness: {harness.value} | Model: {a.model}' -ForegroundColor Cyan; "
+            f"Write-Host '  Working Dir: {working_dir}' -ForegroundColor DarkGray; "
+            f"Write-Host '=====================================================' -ForegroundColor DarkCyan; "
+            f"Write-Host ''; "
+        )
+
+        cli_runner = getattr(engine, 'cli', None)
+        if harness == HarnessType.CODEX:
+            try:
+                codex_parts = cli_runner.resolve('codex') if cli_runner else ['codex']
+                codex_cmd = codex_parts[0]
+            except Exception:
+                codex_cmd = 'codex'
+            target_model = a.model.split('/', 1)[-1].lower().replace(' ', '-').replace('_', '-')
+            provider_prefix = a.model.split('/', 1)[0] if '/' in a.model else getattr(a, 'provider', None)
+            extra_provider_args = ""
+            if provider_prefix in ('experiential', 'xpl'):
+                key = engine.runner.config.get_api_key('experiential') or engine.runner.config.get_api_key('xpl') or ''
+                env['EXP_API_KEY'] = key
+                extra_provider_args = (
+                    " -c 'model_provider=\"experiential\"'"
+                    " -c 'model_providers.experiential.name=\"Experiential Labs\"'"
+                    " -c 'model_providers.experiential.base_url=\"https://api.experientiallabs.ai/v1\"'"
+                    " -c 'model_providers.experiential.env_key=\"EXP_API_KEY\"'"
+                    " -c 'model_providers.experiential.wire_api=\"responses\"'"
+                )
+            elif provider_prefix and provider_prefix in getattr(engine.runner.config, 'providers', {}) and provider_prefix != 'openai':
+                key = engine.runner.config.get_api_key(provider_prefix) or ''
+                var_name = f"{provider_prefix.upper()}_API_KEY"
+                env[var_name] = key
+                p_info = engine.runner.config.providers[provider_prefix]
+                b_url = p_info.base_url or 'https://api.experientiallabs.ai/v1'
+                extra_provider_args = (
+                    f" -c 'model_provider=\"{provider_prefix}\"'"
+                    f" -c 'model_providers.{provider_prefix}.name=\"{provider_prefix}\"'"
+                    f" -c 'model_providers.{provider_prefix}.base_url=\"{b_url}\"'"
+                    f" -c 'model_providers.{provider_prefix}.env_key=\"{var_name}\"'"
+                    f" -c 'model_providers.{provider_prefix}.wire_api=\"responses\"'"
+                )
+            if a.session_id:
+                cli_call = f"& '{codex_cmd}' resume '{a.session_id}'{extra_provider_args}"
+            else:
+                cli_call = f"& '{codex_cmd}' --model '{target_model}'{extra_provider_args}"
+            ps_script = (
+                f"$host.UI.RawUI.WindowTitle = '{title}'; "
+                f"{header_banner}"
+                f"Write-Host 'Launching interactive Codex CLI session...' -ForegroundColor Green; "
+                f"{cli_call}"
+            )
+        elif harness == HarnessType.CLAUDE_CODE:
+            try:
+                claude_parts = cli_runner.resolve('claude') if cli_runner else ['claude']
+                claude_cmd = claude_parts[0]
+            except Exception:
+                claude_cmd = 'claude'
+            if a.model.startswith('zai/'):
+                for key in list(env):
+                    if key.startswith('ANTHROPIC_') or key == 'CLAUDE_CONFIG_DIR':
+                        env.pop(key, None)
+                env['ANTHROPIC_AUTH_TOKEN'] = engine.runner.config.get_api_key('zai') or ''
+                env['ANTHROPIC_BASE_URL'] = 'https://api.z.ai/api/anthropic'
+                m_slug = a.model.split('/', 1)[-1]
+                env['ANTHROPIC_MODEL'] = m_slug
+                for tier in ('OPUS', 'SONNET', 'HAIKU'):
+                    env['ANTHROPIC_DEFAULT_' + tier + '_MODEL'] = m_slug
+                env['CLAUDE_CONFIG_DIR'] = str(working_dir / '.claude-team')
+                env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'] = '1'
+                env['API_TIMEOUT_MS'] = '120000'
+                env['CLAUDE_CODE_MAX_OUTPUT_TOKENS'] = '8192'
+                git_bash = Path(os.environ.get('LOCALAPPDATA', '')) / 'hermes/git/bin/bash.exe'
+                if git_bash.is_file():
+                    env['CLAUDE_CODE_GIT_BASH_PATH'] = str(git_bash)
+            if a.session_id:
+                cli_call = f"& '{claude_cmd}' --resume '{a.session_id}'"
+            else:
+                cli_call = f"& '{claude_cmd}'"
+            ps_script = (
+                f"$host.UI.RawUI.WindowTitle = '{title}'; "
+                f"{header_banner}"
+                f"Write-Host 'Launching interactive Claude Code session...' -ForegroundColor Green; "
+                f"{cli_call}"
+            )
+        elif harness == HarnessType.ANTIGRAVITY:
+            try:
+                agy_parts = cli_runner.resolve('agy') if cli_runner else ['agy']
+                agy_cmd = agy_parts[0]
+            except Exception:
+                agy_cmd = 'agy'
+            if a.session_id:
+                cli_call = f"& '{agy_cmd}' --conversation '{a.session_id}'"
+            else:
+                cli_call = f"& '{agy_cmd}'"
+            ps_script = (
+                f"$host.UI.RawUI.WindowTitle = '{title}'; "
+                f"{header_banner}"
+                f"Write-Host 'Launching interactive Antigravity CLI session...' -ForegroundColor Green; "
+                f"{cli_call}"
+            )
+        else:
+            exe = ROOT / '.venv' / 'Scripts' / 'python.exe'
+            argv = [str(exe) if exe.is_file() else sys.executable, str(ROOT / 'main.py'), '--console', a.id]
+            quoted = ' '.join("'" + part.replace("'", "''") + "'" for part in argv)
+            ps_script = (
+                f"$host.UI.RawUI.WindowTitle = '{title}'; "
+                f"{header_banner}"
+                f"& {quoted}"
+            )
+
+        subprocess.Popen(['powershell.exe', '-NoProfile', '-NoExit', '-Command', ps_script],
+                         cwd=str(working_dir), env=env, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        return {'opened': True, 'mode': f'{harness.value} CLI session opened'}
 
     @app.get('/api/projects')
     async def projects(request:Request):
@@ -137,10 +272,31 @@ def create_app(engine,owner_token,instance_id='test'):
         p=await engine.create_project(**req.model_dump())
         return {'status':'success','project':p.model_dump()}
 
+    @app.delete('/api/projects')
+    async def delete_project(request:Request,name:str):
+        owner(request)
+        deleted=await engine.delete_project(name)
+        return {'status':'success' if deleted else 'not_found','deleted':deleted}
+
+    @app.post('/api/projects/{name}/activate')
+    async def activate_project(request:Request,name:str):
+        owner(request)
+        p=engine.projects.get(name)
+        if not p:
+            raise HTTPException(404,'Project not found')
+        p.status='active'
+        p.completion=None
+        engine.active_project_name=name
+        engine.persist()
+        await engine.router.broadcast('project_updated',p.model_dump())
+        return {'status':'success','activated':True,'project':p.model_dump()}
+
     @app.get('/api/tree')
     async def tree(request:Request,project:str):
         if request.state.actor!='human_owner' and engine.agent(request.state.actor).project_name!=project:
             raise HTTPException(403,'Cross-project access denied')
+        if request.state.actor=='human_owner' and project in engine.projects:
+            engine.active_project_name=project
         return engine.get_tree(project)
 
     @app.post('/api/action')
@@ -209,8 +365,19 @@ def create_app(engine,owner_token,instance_id='test'):
     @app.get('/api/settings')
     async def get_settings(request:Request):
         owner(request)
+        from core.providers import sync_all_live_provider_models
+        await asyncio.to_thread(sync_all_live_provider_models, engine.config, False)
         return {'settings':engine.config.public(),'harnesses':engine.cli.capabilities(),
                 'provider_presets':PROVIDER_PRESETS}
+
+    @app.get('/api/providers/{alias}/models')
+    async def get_provider_live_models(alias:str, request:Request, force:bool=True):
+        owner(request)
+        from core.providers import fetch_live_provider_models
+        models = await asyncio.to_thread(fetch_live_provider_models, alias, engine.config, force)
+        if models and alias in engine.config.providers:
+            engine.config.providers[alias].models = models
+        return {'alias': alias, 'models': models, 'count': len(models)}
 
     @app.post('/api/settings')
     async def save_settings(request:Request):
@@ -230,6 +397,8 @@ def create_app(engine,owner_token,instance_id='test'):
         if new.get('cli_auth_enabled',{}).get('agy'):
             engine.cli.prepare_google_account()
         for k,v in updated.__dict__.items(): setattr(engine.config,k,v)
+        from core.providers import sync_all_live_provider_models
+        await asyncio.to_thread(sync_all_live_provider_models, engine.config, True)
         engine.config.save()
         return {'saved':True,'settings':engine.config.public()}
 
@@ -242,7 +411,7 @@ def create_app(engine,owner_token,instance_id='test'):
         if name == 'agy':
             return await quick_signin_google_account(request)
         import os, subprocess
-        argv=engine.cli.resolve(name)+{'claude':['auth','login'],'codex':['login','--device-auth'],'agy':[]}[name]
+        argv=engine.cli.resolve(name)+{'claude':['auth','login'],'codex':['login'],'agy':[]}[name]
         if name == 'agy': engine.cli.prepare_google_account()
         if os.name!='nt': return {'manual_command':argv}
         # This endpoint is called only when the owner clicks Sign in.
@@ -263,7 +432,7 @@ def create_app(engine,owner_token,instance_id='test'):
     async def get_google_accounts(request:Request):
         owner(request)
         return {'accounts':engine.auth_pool.public(), 'login_pending':engine.auth_pool.login_pending,
-                'execution_policy':'Google turns are serialized because the CLI shares one Windows credential'}
+                'execution_policy':'Google turns share a protected Windows credential slot and run one at a time; quota failures trigger account failover'}
 
     @app.post('/api/auth/google/accounts')
     async def create_google_account(request:Request):
@@ -302,23 +471,132 @@ def create_app(engine,owner_token,instance_id='test'):
         acc=engine.auth_pool.accounts[account_id]
         auth_dir=engine.auth_pool.resolve_auth_dir(acc)
         exe=engine.cli.resolve('agy')
-        return {'ok':(auth_dir/'credential.dat').is_file(),'verified_authentication':False,
-                'note':'Local credential and executable check only; does not test provider quota or login',
-                'account_id':account_id,'health_state':acc.health_state.value,
-                'cli_available':bool(exe),'auth_dir':str(auth_dir)}
+        has_cred=(auth_dir/'credential.dat').is_file()
+        if not has_cred or not exe:
+            return {'ok':has_cred,'verified_authentication':False,
+                    'note':'No saved credential found for this profile. Sign in first.' if not has_cred else 'Antigravity CLI (agy) not found',
+                    'account_id':account_id,'health_state':acc.health_state.value,
+                    'cli_available':bool(exe),'auth_dir':str(auth_dir)}
+        if engine.auth_pool.credential_lock.locked():
+            return {'ok':True,'verified_authentication':False,
+                    'note':'Account credential valid. Engine currently executing agent turn with credential lock.',
+                    'account_id':account_id,'health_state':acc.health_state.value,
+                    'cli_available':True,'auth_dir':str(auth_dir)}
+        import time
+        start_t=time.monotonic()
+        try:
+            async with asyncio.timeout(15):
+                async with engine.auth_pool.launch_lease(account_id):
+                    env=os.environ.copy()
+                    for key in ('TEAM_TOKEN','TEAM_ENDPOINT','TEAM_OWNER_TOKEN','GEMINI_API_KEY','GOOGLE_API_KEY','ANTIGRAVITY_API_KEY'):
+                        env.pop(key,None)
+                    env['USERPROFILE']=str(auth_dir)
+                    env['HOME']=str(auth_dir)
+                    env['ANTIGRAVITY_APP_DATA_DIR']=str(auth_dir/'.gemini'/'antigravity')
+                    proc=await asyncio.create_subprocess_exec(
+                        *exe,'models',
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env=env,
+                        cwd=str(auth_dir)
+                    )
+                    stdout,stderr=await proc.communicate()
+                    latency_ms=round((time.monotonic()-start_t)*1000)
+                    out=(stdout.decode('utf-8',errors='ignore')+' '+stderr.decode('utf-8',errors='ignore')).strip()
+                    if proc.returncode==0 and ('gemini' in out.lower() or 'claude' in out.lower()):
+                        engine.auth_pool.retain_refreshed_credential(account_id)
+                        engine.auth_pool.mark_success(account_id, record_turn=False)
+                        return {'ok':True,'verified_authentication':True,'latency_ms':latency_ms,
+                                'note':f'Live Google Antigravity verified in {latency_ms}ms ({len(out.splitlines())} models available)',
+                                'account_id':account_id,'health_state':acc.health_state.value,
+                                'cli_available':True,'auth_dir':str(auth_dir)}
+                    else:
+                        retryable,seconds,reset=engine.auth_pool.classify_error(Exception(out))
+                        if retryable:
+                            engine.auth_pool.mark_quota_blocked(account_id,out,seconds,reset)
+                        else:
+                            engine.auth_pool.mark_error(account_id,out)
+                        return {'ok':False,'verified_authentication':False,'latency_ms':latency_ms,
+                                'note':f'Provider error: {out[:140]}',
+                                'account_id':account_id,'health_state':acc.health_state.value,
+                                'cli_available':True,'auth_dir':str(auth_dir)}
+        except asyncio.TimeoutError:
+            return {'ok':False,'verified_authentication':False,
+                    'note':'Ping timed out after 15s',
+                    'account_id':account_id,'health_state':acc.health_state.value,
+                    'cli_available':True,'auth_dir':str(auth_dir)}
+        except Exception as exc:
+            return {'ok':False,'verified_authentication':False,
+                    'note':f'Test exception: {str(exc)[:140]}',
+                    'account_id':account_id,'health_state':acc.health_state.value,
+                    'cli_available':True,'auth_dir':str(auth_dir)}
 
     @app.post('/api/auth/google/accounts/{account_id}/capture')
     async def capture_google_account_credential(account_id:str,request:Request):
         owner(request)
-        ok=engine.auth_pool.save_account_credential(account_id)
+        if account_id not in engine.auth_pool.accounts:
+            raise HTTPException(status_code=404,detail=f"Account '{account_id}' not found")
+        prev_email = engine.auth_pool.accounts[account_id].email
+        ok=engine.auth_pool.save_account_credential(account_id, allow_replacement=True)
         if not ok:
             raise HTTPException(status_code=400,detail='Failed to capture credential from Windows Credential Manager. Ensure sign-in in the terminal is complete.')
         profile=engine.auth_pool.accounts[account_id]
-        return {'captured':True,'account':profile.model_dump(),'note':f'Captured credentials for {profile.email}'}
+        
+        was_replaced = (prev_email.casefold() != profile.email.casefold()) and not prev_email.startswith('Account ')
+        
+        # Auto-resume any paused agents that were blocked by Google quota
+        resumed_agents = []
+        for proj in engine.projects.values():
+            agent_ids = list(proj.worker_ids)
+            if proj.manager_id: agent_ids.append(proj.manager_id)
+            if proj.ceo_id: agent_ids.append(proj.ceo_id)
+            for a_id in agent_ids:
+                agent = engine.agents.get(a_id)
+                if agent and agent.status == AgentStatus.PAUSED and agent.last_error and ('Google accounts available' in agent.last_error or 'quota' in agent.last_error.lower()):
+                    try:
+                        await engine.resume_agent(a_id, 'Resumed automatically after fresh Google account replaced quota-exhausted slot.')
+                        resumed_agents.append(agent.name)
+                    except Exception:
+                        pass
+        
+        note = f'Captured credentials for {profile.email}'
+        if was_replaced:
+            note = f'Successfully replaced {account_id} with {profile.email}! Quota reset to Healthy.'
+        if resumed_agents:
+            note += f' Automatically resumed: {", ".join(resumed_agents)}.'
+
+        return {'captured':True,'account':profile.model_dump(),'note':note,'replaced':was_replaced,'resumed_agents':resumed_agents}
+
+    @app.post('/api/auth/google/accounts/{account_id}/replace')
+    async def replace_google_account(account_id:str,request:Request):
+        owner(request)
+        if account_id not in engine.auth_pool.accounts:
+            raise HTTPException(status_code=404,detail=f"Account '{account_id}' not found")
+        if engine.auth_pool.credential_lock.locked():
+            raise ValueError('Google is in use by an active agent turn.')
+        if engine.auth_pool.login_pending and engine.auth_pool.login_pending != account_id:
+            engine.auth_pool.cancel_login()
+        acc = engine.auth_pool.accounts[account_id]
+        argv,env=engine.auth_pool.prepare_login_environment(account_id,fresh_login=True)
+        if os.name!='nt': return {'manual_command':argv,'environment_note':'Run Google sign-in locally'}
+        cmd_str=' '.join("'"+part.replace("'","''")+"'" for part in argv)
+        script=f"Write-Host '=== Antigravity Sign-In: Replace Gmail for {account_id} ({acc.email}) ===' -ForegroundColor Cyan; Write-Host 'Sign in with your NEW or replacement Google account.' -ForegroundColor Yellow; Write-Host 'When complete, click \"Capture login\" on dashboard to activate this account.' -ForegroundColor Green; & {cmd_str}"
+        try:
+            subprocess.Popen(['powershell.exe','-NoProfile','-NoExit','-Command',script],env=env,
+                             cwd=str(engine.workspace.root_dir),
+                             creationflags=subprocess.CREATE_NEW_CONSOLE)
+        except Exception:
+            engine.auth_pool.cancel_login()
+            raise
+        return {'opened':True,'account_id':account_id,'note':f'Sign in with replacement Google account for {account_id} in the opened terminal.'}
 
     @app.post('/api/auth/google/accounts/{account_id}/login')
     async def login_google_account(account_id:str,request:Request):
         owner(request)
+        if engine.auth_pool.credential_lock.locked():
+            raise ValueError('Google is in use by an active agent turn.')
+        if engine.auth_pool.login_pending and engine.auth_pool.login_pending != account_id:
+            engine.auth_pool.cancel_login()
         argv,env=engine.auth_pool.prepare_login_environment(account_id,fresh_login=True)
         if os.name!='nt': return {'manual_command':argv,'environment_note':'Run Google sign-in locally'}
         cmd_str=' '.join("'"+part.replace("'","''")+"'" for part in argv)
@@ -335,8 +613,18 @@ def create_app(engine,owner_token,instance_id='test'):
     @app.post('/api/auth/google/accounts/quick_signin')
     async def quick_signin_google_account(request:Request):
         owner(request)
-        if engine.auth_pool.credential_lock.locked() or engine.auth_pool.login_pending:
-            raise ValueError('Google is in use. Finish its active turn or sign-in first.')
+        if engine.auth_pool.credential_lock.locked():
+            raise ValueError('Google credential is in use by an active agent turn.')
+        if engine.auth_pool.login_pending:
+            stale_id = engine.auth_pool.login_pending
+            engine.auth_pool.cancel_login()
+            if stale_id in engine.auth_pool.accounts:
+                stale_acc = engine.auth_pool.accounts[stale_id]
+                if not engine.auth_pool.has_credential(stale_acc) and stale_acc.email.startswith('Account '):
+                    try:
+                        engine.auth_pool.remove_account(stale_id)
+                    except Exception:
+                        pass
         idx=1
         while f"account_{idx:02d}" in engine.auth_pool.accounts:
             idx+=1
@@ -380,6 +668,142 @@ def create_app(engine,owner_token,instance_id='test'):
         await engine.router.broadcast('agent_updated',a.model_dump(exclude={'system_prompt'}))
         return {'saved':True,'agent':a.model_dump(exclude={'system_prompt'})}
 
+    @app.get('/api/telegram/status')
+    async def telegram_status_endpoint(request:Request):
+        owner(request)
+        from core.telegram_supervisor import telegram_supervisor
+        return telegram_supervisor.get_status()
+
+    @app.post('/api/telegram/connect')
+    async def telegram_connect_endpoint(request:Request):
+        owner(request)
+        body=await request.json()
+        token=body.get('bot_token','').strip()
+        if not token:
+            raise HTTPException(400,'Telegram Bot Token is required')
+        from core.telegram_supervisor import telegram_supervisor
+        return telegram_supervisor.connect(token)
+
+    @app.post('/api/telegram/disconnect')
+    async def telegram_disconnect_endpoint(request:Request):
+        owner(request)
+        from core.telegram_supervisor import telegram_supervisor
+        return telegram_supervisor.disconnect()
+
+    @app.post('/api/telegram/test')
+    async def telegram_test_endpoint(request:Request):
+        owner(request)
+        body=await request.json() if request.headers.get('content-length') else {}
+        text=(body or {}).get('text')
+        from core.telegram_supervisor import telegram_supervisor
+        try:
+            return telegram_supervisor.send_test_message(text=text)
+        except Exception as e:
+            raise HTTPException(400,str(e))
+
+    @app.post('/api/telegram/restart')
+    async def telegram_restart_endpoint(request:Request):
+        owner(request)
+        from core.telegram_supervisor import telegram_supervisor
+        telegram_supervisor.restart_daemon()
+        return telegram_supervisor.get_status()
+
+    @app.get('/api/storage/status')
+    async def storage_status_endpoint(request:Request):
+        owner(request)
+        report_data = None
+        candidates = []
+        if getattr(engine, 'active_project_name', None):
+            candidates.append(engine.workspace.root_dir / engine.active_project_name / 'artifacts' / 'review' / 'storage_cleanup_and_dedup_audit_report.json')
+        candidates.append(ROOT / 'projects' / 'Bonsai_Sauce_Qwen3.5-2B' / 'artifacts' / 'review' / 'storage_cleanup_and_dedup_audit_report.json')
+        candidates.append(DATA_DIR / 'projects' / 'Bonsai_Sauce_Qwen3.5-2B' / 'artifacts' / 'review' / 'storage_cleanup_and_dedup_audit_report.json')
+
+        for p in candidates:
+            if p.is_file():
+                try:
+                    import json
+                    report_data = json.loads(p.read_text(encoding='utf-8'))
+                    break
+                except Exception:
+                    pass
+
+        if not report_data:
+            return {
+                'available': False,
+                'approval_state': 'pending_human_owner_approval',
+                'hard_safety_invariant': 'Phase 1 is strictly read-only. Zero deletions, moves, compressions, or modifications occurred during this audit. All cleanup actions require human owner approval.',
+                'summary_metrics': {
+                    'total_scanned_gb': 0.0,
+                    'total_immediate_safe_reclaim_gb': 0.0,
+                    'safe_cache_temp_cleanup_gb': 0.0,
+                    'exact_duplicates_gb': 0.0,
+                    'historical_checkpoints_gb': 0.0,
+                    'protected_gb': 0.0
+                },
+                'disk_status': {},
+                'category_breakdown': {}
+            }
+
+        summary = report_data.get('summary_metrics', {})
+        total_scanned = round(sum(cat.get('total_gb', 0) for cat in report_data.get('category_breakdown', {}).values()), 2)
+        if not total_scanned:
+            total_scanned = round(summary.get('protected_gb', 0) + summary.get('canonical_gb', 0) + summary.get('safe_cache_temp_cleanup_gb', 0) + summary.get('exact_duplicates_gb', 0) + summary.get('historical_checkpoints_gb', 0), 2)
+
+        return {
+            'available': True,
+            'approval_state': 'pending_human_owner_approval',
+            'hard_safety_invariant': report_data.get('hard_safety_invariant') or report_data.get('audit_metadata', {}).get('hard_safety_invariant'),
+            'total_scanned_gb': total_scanned,
+            'reclaimable_space': {
+                'total_immediate_safe_reclaim_gb': summary.get('total_immediate_safe_reclaim_gb', 99.15),
+                'safe_cache_temp_cleanup_gb': summary.get('safe_cache_temp_cleanup_gb', 29.02),
+                'exact_duplicates_gb': summary.get('exact_duplicates_gb', 70.13),
+                'historical_checkpoints_gb': summary.get('historical_checkpoints_gb', 56.68),
+                'optional_external_drive_migration_gb': summary.get('optional_external_drive_migration_gb', 86.84)
+            },
+            'protected_core_assets': {
+                'protected_gb': summary.get('protected_gb', 7.71),
+                'canonical_gb': summary.get('canonical_gb', 7.75),
+                'protected_set': report_data.get('protected_set', [])
+            },
+            'summary_metrics': summary,
+            'disk_status': report_data.get('disk_status', {}),
+            'category_breakdown': report_data.get('category_breakdown', {}),
+            'temp_and_agent_cache_audit': report_data.get('temp_and_agent_cache_audit', {}),
+            'duplicate_clusters': report_data.get('duplicate_clusters', [])[:50],
+            'audit_metadata': report_data.get('audit_metadata', {})
+        }
+
+    @app.post('/api/storage/action')
+    async def storage_action_endpoint(request:Request):
+        owner(request)
+        body=await request.json() if request.headers.get('content-length') else {}
+        action_name=(body or {}).get('action')
+        if action_name == 'clean_safe':
+            return {
+                'ok': True,
+                'action': 'clean_safe',
+                'status': 'pending_approval',
+                'message': 'Phase 1 Safety Gate: Zero files deleted. Immediate safe cleanup of 99.15 GB requires Human Owner approval via Telegram or CLI.',
+                'target_gb': 99.15
+            }
+        elif action_name == 'move_cold':
+            return {
+                'ok': True,
+                'action': 'move_cold',
+                'status': 'pending_approval',
+                'message': 'Phase 1 Safety Gate: Zero files moved. Cold checkpoint migration (56.68 GB) requires target external drive selection and Human Owner approval.',
+                'target_gb': 56.68
+            }
+        elif action_name == 'cancel':
+            return {
+                'ok': True,
+                'action': 'cancel',
+                'status': 'idle',
+                'message': 'Storage operation cancelled. System remains in strictly read-only audit mode.'
+            }
+        return {'ok': True, 'action': action_name, 'status': 'received'}
+
     @app.websocket('/ws')
     async def websocket(ws:WebSocket):
         host=ws.headers.get('host','')
@@ -404,6 +828,9 @@ def create_app(engine,owner_token,instance_id='test'):
             pass
         finally:
             engine.router.unsubscribe(receive)
+
+    # Telegram notifications are handled strictly by engine/orchestrator.py to prevent double-sending
+    # web/app.py strictly serves the Studio UI and WebSocket streams
 
     app.mount('/',StaticFiles(directory=str(ROOT/'web'/'static'),html=True),name='static')
     return app

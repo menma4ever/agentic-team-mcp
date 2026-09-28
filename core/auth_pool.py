@@ -112,9 +112,18 @@ class GoogleAccountHealth(str, Enum):
     HEALTHY = 'healthy'
     RATE_LIMITED = 'rate-limited'
     QUOTA_BLOCKED = 'quota-blocked'
+    AUTH_VERIFICATION_REQUIRED = 'auth-verification-required'
+    TRANSIENT_ERROR = 'transient-error'
     ERROR = 'error'
     UNKNOWN = 'unknown'
     DISABLED = 'disabled'
+
+
+def is_claude_model(model: Optional[str] = None) -> bool:
+    if not model:
+        return False
+    m = model.lower()
+    return 'claude' in m or 'opus' in m or 'sonnet' in m or 'haiku' in m
 
 
 class GoogleAccountProfile(BaseModel):
@@ -129,29 +138,69 @@ class GoogleAccountProfile(BaseModel):
     cooldown_until: Optional[str] = None
     usage_5h: Optional[dict] = None
     usage_weekly: Optional[dict] = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
     active_agents: int = 0
+    claude_health_state: GoogleAccountHealth = GoogleAccountHealth.HEALTHY
+    claude_cooldown_until: Optional[str] = None
+    claude_last_error: Optional[str] = None
+    claude_last_successful_use: Optional[str] = None
+    claude_usage_5h: Optional[dict] = None
+    claude_usage_weekly: Optional[dict] = None
+    claude_input_tokens: int = 0
+    claude_output_tokens: int = 0
+    claude_cache_read_tokens: int = 0
+    claude_active_agents: int = 0
     max_concurrent: int = 4
     created_at: str = Field(default_factory=now)
     updated_at: str = Field(default_factory=now)
 
-    def is_cooldown_active(self) -> bool:
-        if not self.cooldown_until:
+    def effective_health(self, model: Optional[str] = None) -> GoogleAccountHealth:
+        if self.health_state in (GoogleAccountHealth.DISABLED, GoogleAccountHealth.ERROR, GoogleAccountHealth.AUTH_VERIFICATION_REQUIRED):
+            return self.health_state
+        if is_claude_model(model):
+            return self.claude_health_state if self.claude_health_state != GoogleAccountHealth.UNKNOWN else GoogleAccountHealth.HEALTHY
+        return self.health_state
+
+    def is_cooldown_active(self, model: Optional[str] = None) -> bool:
+        target_cd = self.claude_cooldown_until if is_claude_model(model) else self.cooldown_until
+        if not target_cd:
             return False
         try:
-            dt = datetime.fromisoformat(self.cooldown_until)
+            dt = datetime.fromisoformat(target_cd.replace('Z', '+00:00'))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             return datetime.now(timezone.utc) < dt
         except (ValueError, TypeError):
             return False
 
-    def remaining_cooldown_seconds(self) -> int:
-        if not self.cooldown_until:
+    def remaining_cooldown_seconds(self, model: Optional[str] = None) -> int:
+        target_cd = self.claude_cooldown_until if is_claude_model(model) else self.cooldown_until
+        if not target_cd:
             return 0
         try:
-            dt = datetime.fromisoformat(self.cooldown_until)
+            dt = datetime.fromisoformat(target_cd.replace('Z', '+00:00'))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             diff = (dt - datetime.now(timezone.utc)).total_seconds()
             return max(0, int(diff))
         except (ValueError, TypeError):
             return 0
+
+    def remaining_cooldown_formatted(self, model: Optional[str] = None) -> str:
+        sec = self.remaining_cooldown_seconds(model=model)
+        if sec <= 0:
+            return "Ready"
+        hours = sec // 3600
+        mins = (sec % 3600) // 60
+        secs = sec % 60
+        if hours > 0:
+            return f"{hours}h {mins}m"
+        elif mins > 0:
+            return f"{mins}m {secs}s"
+        else:
+            return f"{secs}s"
 
     def is_eligible_for_model(self, model: str) -> bool:
         if '*' in self.model_eligibility:
@@ -176,6 +225,7 @@ class GoogleAuthPool:
         self.credential_lock = asyncio.Lock()
         self.login_pending = None
         self._login_previous = None
+        self._vault_baseline = None
         self.login_done = asyncio.Event()
         self.login_done.set()
         self.load()
@@ -195,10 +245,40 @@ class GoogleAuthPool:
                         account.last_run_error = account.last_error
                         account.last_error = None
                         account.health_state = GoogleAccountHealth.UNKNOWN
+
+                    # Auto-heal stale, expired or false-cooldown states:
+                    if account.health_state in (GoogleAccountHealth.QUOTA_BLOCKED, GoogleAccountHealth.RATE_LIMITED, GoogleAccountHealth.TRANSIENT_ERROR):
+                        if account.last_error and ('[agy] print timeout' in account.last_error or 'print timeout after' in account.last_error):
+                            account.health_state = GoogleAccountHealth.HEALTHY
+                            account.cooldown_until = None
+                            account.last_error = None
+                        elif account.last_error and ('82h26m52s' in account.last_error or account.last_error.startswith('API error (attempt ')):
+                            account.health_state = GoogleAccountHealth.HEALTHY
+                            account.cooldown_until = None
+                            account.last_error = None
+                        elif not account.is_cooldown_active(None):
+                            account.health_state = GoogleAccountHealth.HEALTHY
+                            account.cooldown_until = None
+                            account.last_error = None
+                    if account.claude_health_state in (GoogleAccountHealth.QUOTA_BLOCKED, GoogleAccountHealth.RATE_LIMITED, GoogleAccountHealth.TRANSIENT_ERROR):
+                        if not account.is_cooldown_active('claude'):
+                            account.claude_health_state = GoogleAccountHealth.HEALTHY
+                            account.claude_cooldown_until = None
+                            account.claude_last_error = None
             except Exception as exc:
                 raise RuntimeError("Google account registry is unreadable; restore or repair it before starting") from exc
         else:
             self.accounts = {}
+        self._registry_mtime = self.registry_file.stat().st_mtime if self.registry_file.exists() else 0
+
+    def maybe_reload(self):
+        if self.registry_file.exists():
+            try:
+                mtime = self.registry_file.stat().st_mtime
+                if mtime > getattr(self, '_registry_mtime', 0):
+                    self.load()
+            except Exception:
+                pass
 
     def save(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -209,27 +289,124 @@ class GoogleAuthPool:
         }
         temp.write_text(json.dumps(payload, indent=2), encoding='utf-8')
         temp.replace(self.registry_file)
+        try:
+            self._registry_mtime = self.registry_file.stat().st_mtime
+        except Exception:
+            pass
+
+    def heal_expired_cooldowns(self) -> List[str]:
+        """Checks all accounts and transitions any expired cooldowns or false blocks to HEALTHY.
+        Returns list of healed account_ids.
+        """
+        healed = []
+        changed = False
+        for acc in self.accounts.values():
+            if acc.health_state in (GoogleAccountHealth.QUOTA_BLOCKED, GoogleAccountHealth.RATE_LIMITED, GoogleAccountHealth.TRANSIENT_ERROR):
+                if acc.last_error and (
+                    '[agy] print timeout' in acc.last_error
+                    or 'print timeout after' in acc.last_error
+                    or '82h26m52s' in acc.last_error
+                    or acc.last_error.startswith('API error (attempt ')
+                ):
+                    acc.health_state = GoogleAccountHealth.HEALTHY
+                    acc.cooldown_until = None
+                    acc.last_error = None
+                    acc.updated_at = now()
+                    healed.append(acc.account_id)
+                    changed = True
+                elif not acc.is_cooldown_active(None):
+                    acc.health_state = GoogleAccountHealth.HEALTHY
+                    acc.cooldown_until = None
+                    acc.last_error = None
+                    acc.updated_at = now()
+                    healed.append(acc.account_id)
+                    changed = True
+            if acc.claude_health_state in (GoogleAccountHealth.QUOTA_BLOCKED, GoogleAccountHealth.RATE_LIMITED, GoogleAccountHealth.TRANSIENT_ERROR):
+                if not acc.is_cooldown_active('claude'):
+                    acc.claude_health_state = GoogleAccountHealth.HEALTHY
+                    acc.claude_cooldown_until = None
+                    acc.claude_last_error = None
+                    acc.updated_at = now()
+                    if acc.account_id not in healed:
+                        healed.append(acc.account_id)
+                    changed = True
+        if changed:
+            self.save()
+        return healed
 
     def public(self, include_identity=True) -> List[dict]:
         """Public view of accounts for dashboard and MCP clients (no plaintext secrets)."""
+        self.maybe_reload()
+        self.heal_expired_cooldowns()
         result = []
         for acc in self.accounts.values():
             d = acc.model_dump()
             d['credential_saved'] = self.has_credential(acc)
-            d['in_cooldown'] = acc.is_cooldown_active()
-            for attr, seconds in [('usage_5h', 18000), ('usage_weekly', 604800)]:
+            d['in_cooldown'] = acc.is_cooldown_active(None)
+            d['claude_in_cooldown'] = acc.is_cooldown_active('claude')
+            d['claude_health_state'] = acc.effective_health('claude').value
+            for attr, seconds in [
+                ('usage_5h', 18000),
+                ('usage_weekly', 604800),
+                ('claude_usage_5h', 18000),
+                ('claude_usage_weekly', 604800),
+            ]:
                 usage = getattr(acc, attr) or {}
                 if 'observed_turns' in usage:
                     cutoff = datetime.now(timezone.utc).timestamp() - seconds
-                    d[attr] = {'turns':sum(t > cutoff for t in usage['observed_turns']), 'source':'local observations'}
-                else: d[attr] = None
-            d['remaining_cooldown_seconds'] = acc.remaining_cooldown_seconds()
+                    turns = 0
+                    in_tok = 0
+                    out_tok = 0
+                    cache_tok = 0
+                    for s in usage['observed_turns']:
+                        ts = s.get('t', 0) if isinstance(s, dict) else s
+                        if ts > cutoff:
+                            turns += 1
+                            if isinstance(s, dict):
+                                in_tok += s.get('in', 0)
+                                out_tok += s.get('out', 0)
+                                cache_tok += s.get('cache', 0)
+                    if turns > 0 and in_tok == 0 and out_tok == 0 and cache_tok == 0:
+                        is_claude_attr = 'claude' in attr
+                        acc_in = acc.claude_input_tokens if is_claude_attr else acc.input_tokens
+                        acc_out = acc.claude_output_tokens if is_claude_attr else acc.output_tokens
+                        acc_cache = acc.claude_cache_read_tokens if is_claude_attr else acc.cache_read_tokens
+                        if acc_in or acc_out or acc_cache:
+                            in_tok = acc_in
+                            out_tok = acc_out
+                            cache_tok = acc_cache
+                    d[attr] = {
+                        'turns': turns,
+                        'input_tokens': in_tok,
+                        'output_tokens': out_tok,
+                        'cache_read_tokens': cache_tok,
+                        'total_tokens': in_tok + out_tok + cache_tok,
+                        'source': 'local observations'
+                    }
+                else:
+                    d[attr] = None
+            d['remaining_cooldown_seconds'] = acc.remaining_cooldown_seconds(None)
+            d['remaining_cooldown_formatted'] = acc.remaining_cooldown_formatted(None)
+            d['claude_remaining_cooldown_seconds'] = acc.remaining_cooldown_seconds('claude')
+            d['claude_remaining_cooldown_formatted'] = acc.remaining_cooldown_formatted('claude')
+            d['input_tokens'] = acc.input_tokens
+            d['output_tokens'] = acc.output_tokens
+            d['cache_read_tokens'] = acc.cache_read_tokens
+            d['claude_input_tokens'] = acc.claude_input_tokens
+            d['claude_output_tokens'] = acc.claude_output_tokens
+            d['claude_cache_read_tokens'] = acc.claude_cache_read_tokens
             if not include_identity:
-                # Models need scheduler availability, not owner email addresses,
-                # native credential paths, or provider error transcripts.
-                fields = {'account_id', 'health_state', 'enabled', 'active_agents',
-                          'max_concurrent', 'credential_saved', 'in_cooldown',
-                          'remaining_cooldown_seconds', 'usage_5h', 'usage_weekly'}
+                fields = {
+                    'account_id', 'health_state', 'enabled', 'active_agents',
+                    'max_concurrent', 'credential_saved', 'in_cooldown',
+                    'remaining_cooldown_seconds', 'remaining_cooldown_formatted',
+                    'input_tokens', 'output_tokens', 'cache_read_tokens',
+                    'usage_5h', 'usage_weekly',
+                    'claude_health_state', 'claude_in_cooldown', 'claude_active_agents',
+                    'claude_remaining_cooldown_seconds', 'claude_remaining_cooldown_formatted',
+                    'claude_input_tokens', 'claude_output_tokens', 'claude_cache_read_tokens',
+                    'claude_usage_5h', 'claude_usage_weekly',
+                }
                 d = {key: value for key, value in d.items() if key in fields}
             result.append(d)
         return result
@@ -340,23 +517,33 @@ class GoogleAuthPool:
         """Selects the best available account profile according to the scheduler score.
         Do NOT rotate during an ongoing request.
         """
+        self.maybe_reload()
+        self.heal_expired_cooldowns()
         exclude = set(exclude or [])
+        agent_model = getattr(agent, 'model', None)
+        is_claude = is_claude_model(agent_model)
         forced = getattr(agent, 'forced_auth_slot_id', None)
         if forced:
             if forced not in self.accounts:
                 raise ValueError(f"Forced account '{forced}' is not registered in Google Auth Pool")
             acc = self.accounts[forced]
-            if forced in exclude or acc.health_state in (GoogleAccountHealth.DISABLED, GoogleAccountHealth.ERROR):
+            if forced in exclude or acc.effective_health(agent_model) in (GoogleAccountHealth.DISABLED, GoogleAccountHealth.ERROR, GoogleAccountHealth.AUTH_VERIFICATION_REQUIRED):
                 raise ValueError(f"Forced account '{forced}' is unavailable")
-            if not acc.is_eligible_for_model(agent.model) or acc.active_agents >= acc.max_concurrent:
+            total_active = acc.active_agents + acc.claude_active_agents
+            if not acc.is_eligible_for_model(agent_model) or total_active >= acc.max_concurrent:
                 raise ValueError(f"Forced account '{forced}' cannot accept this model/turn")
             if not self.has_credential(acc):
                 raise ValueError(f"Forced account '{forced}' has no saved credential")
-            if acc.is_cooldown_active():
-                raise ValueError(f"Forced account '{forced}' is quota-blocked until {acc.cooldown_until}")
-            acc.active_agents += 1
+            if acc.is_cooldown_active(agent_model):
+                cd_str = acc.claude_cooldown_until if is_claude else acc.cooldown_until
+                raise ValueError(f"Forced account '{forced}' is quota-blocked until {cd_str}")
+            if is_claude:
+                acc.claude_active_agents += 1
+            else:
+                acc.active_agents += 1
             acc.updated_at = now()
             self.save()
+            self.capture_vault_baseline()
             return acc
 
         # Sticky session / Account affinity:
@@ -364,73 +551,93 @@ class GoogleAuthPool:
         current_slot_id = getattr(agent, 'auth_slot_id', None)
         if current_slot_id and current_slot_id not in exclude and current_slot_id in self.accounts:
             current_acc = self.accounts[current_slot_id]
-            if (current_acc.health_state not in (GoogleAccountHealth.DISABLED, GoogleAccountHealth.ERROR)
+            total_active = current_acc.active_agents + current_acc.claude_active_agents
+            if (current_acc.effective_health(agent_model) not in (GoogleAccountHealth.DISABLED, GoogleAccountHealth.ERROR, GoogleAccountHealth.AUTH_VERIFICATION_REQUIRED)
                     and self.has_credential(current_acc)
-                    and not current_acc.is_cooldown_active()
-                    and current_acc.is_eligible_for_model(agent.model)
-                    and current_acc.active_agents < current_acc.max_concurrent):
-                current_acc.active_agents += 1
+                    and not current_acc.is_cooldown_active(agent_model)
+                    and current_acc.is_eligible_for_model(agent_model)
+                    and total_active < current_acc.max_concurrent):
+                if is_claude:
+                    current_acc.claude_active_agents += 1
+                else:
+                    current_acc.active_agents += 1
                 current_acc.updated_at = now()
                 self.save()
+                self.capture_vault_baseline()
                 return current_acc
 
         candidates = []
         for acc in self.accounts.values():
             if acc.account_id in exclude:
                 continue
-            if acc.health_state in (GoogleAccountHealth.DISABLED, GoogleAccountHealth.ERROR):
+            if acc.effective_health(agent_model) in (GoogleAccountHealth.DISABLED, GoogleAccountHealth.ERROR, GoogleAccountHealth.AUTH_VERIFICATION_REQUIRED):
                 continue
-            if not self.has_credential(acc) or acc.is_cooldown_active():
+            if not self.has_credential(acc) or acc.is_cooldown_active(agent_model):
                 continue
-            # Reset cooldown if expired
-            if acc.cooldown_until and not acc.is_cooldown_active():
-                acc.cooldown_until = None
-                if acc.health_state in (GoogleAccountHealth.QUOTA_BLOCKED, GoogleAccountHealth.RATE_LIMITED):
-                    acc.health_state = GoogleAccountHealth.HEALTHY
-            if not acc.is_eligible_for_model(agent.model):
+            if not acc.is_eligible_for_model(agent_model):
                 continue
-            if acc.active_agents >= acc.max_concurrent:
+            if (acc.active_agents + acc.claude_active_agents) >= acc.max_concurrent:
                 continue
             candidates.append(acc)
 
         if not candidates:
-            # Check if any account will reset soon
-            earliest = self.earliest_reset()
+            earliest = self.earliest_reset(model=agent_model)
             msg = "No healthy Google accounts available."
             if earliest:
                 msg += f" Earliest quota reset at {earliest}."
             raise RuntimeError(msg)
 
-        # Scheduler scoring:
-        # Prefer:
-        # 1. Fewest active agents
-        # 2. Lowest observed short-window usage (turns or tokens if available)
-        # 3. Lowest observed weekly usage
-        # 4. Longest time since last use
         def score(acc: GoogleAccountProfile):
-            active_score = acc.active_agents * 10000
+            active_count = acc.claude_active_agents if is_claude else acc.active_agents
+            active_score = active_count * 10000 + (acc.active_agents + acc.claude_active_agents) * 2000
+            u5 = acc.claude_usage_5h if is_claude else acc.usage_5h
+            uw = acc.claude_usage_weekly if is_claude else acc.usage_weekly
             short_usage = 0
-            if acc.usage_5h and isinstance(acc.usage_5h, dict):
-                short_usage = acc.usage_5h.get('pct', 0) * 100 or acc.usage_5h.get('turns', 0) * 10
+            if u5 and isinstance(u5, dict):
+                short_usage = u5.get('pct', 0) * 100 or u5.get('turns', 0) * 10
             weekly_usage = 0
-            if acc.usage_weekly and isinstance(acc.usage_weekly, dict):
-                weekly_usage = acc.usage_weekly.get('pct', 0) * 50 or acc.usage_weekly.get('turns', 0) * 5
-            error_penalty = 5000 if acc.health_state == GoogleAccountHealth.ERROR else 0
+            if uw and isinstance(uw, dict):
+                weekly_usage = uw.get('pct', 0) * 50 or uw.get('turns', 0) * 5
+            error_penalty = 5000 if acc.effective_health(agent_model) == GoogleAccountHealth.ERROR else 0
             return active_score + short_usage + weekly_usage + error_penalty
 
         candidates.sort(key=score)
         selected = candidates[0]
-        selected.active_agents += 1
+        if is_claude:
+            selected.claude_active_agents += 1
+        else:
+            selected.active_agents += 1
         selected.updated_at = now()
         self.save()
+        self.capture_vault_baseline()
         return selected
 
-    def release_slot(self, account_id: str):
+    def release_slot(self, account_id: str, model: Optional[str] = None):
         if account_id in self.accounts:
             acc = self.accounts[account_id]
-            acc.active_agents = max(0, acc.active_agents - 1)
+            if is_claude_model(model):
+                acc.claude_active_agents = max(0, acc.claude_active_agents - 1)
+            else:
+                acc.active_agents = max(0, acc.active_agents - 1)
             acc.updated_at = now()
             self.save()
+        if self.total_active_agents() == 0:
+            self.restore_vault_baseline()
+
+    def total_active_agents(self) -> int:
+        return sum(acc.active_agents + acc.claude_active_agents for acc in self.accounts.values())
+
+    def capture_vault_baseline(self):
+        if self._vault_baseline is None:
+            self._vault_baseline = WindowsKeyringHelper.read_credential()
+
+    def restore_vault_baseline(self):
+        if self._vault_baseline:
+            try:
+                WindowsKeyringHelper.write_credential(self._vault_baseline[1], self._vault_baseline[0])
+            except Exception:
+                pass
+            self._vault_baseline = None
 
     def classify_error(self, exc: Exception) -> Tuple[bool, int, Optional[str]]:
         """Classifies an error into retryable vs non-retryable.
@@ -446,6 +653,8 @@ class GoogleAuthPool:
             'malformed request', 'invalid argument', 'invalid_argument',
             'model unavailable', 'model not found', 'not configured',
             'arbitrary shell shims are unsupported', 'unsupported glm coding plan',
+            'eligibility check failed', 'not eligible for antigravity', 'verify your account',
+            '[agy] print timeout', 'print timeout after',
         ]
         for term in non_retryable_terms:
             if term in text_lower:
@@ -453,6 +662,7 @@ class GoogleAuthPool:
 
         if any(term in text_lower for term in ('model_capacity_exhausted', 'capacity exhausted', 'prefill_queue_overloaded')):
             return False, 0, None  # Provider capacity is not an account quota.
+
 
         # Retryable quota / rate-limit patterns
         retryable_terms = [
@@ -467,27 +677,26 @@ class GoogleAuthPool:
             return False, 0, None
 
         # Attempt to parse reset duration or timestamp
+        has_explicit_reset = False
         cooldown_seconds = 1800  # Default 30 mins
         parsed_iso = None
 
         # Pattern: "reset in 41m", "reset in 2 hours", "reset in 300s"
-        m_reset = re.search(r'reset\s+in\s+(\d+)\s*(m|min|minutes|s|sec|seconds|h|hours|d|days)?', text, re.IGNORECASE)
+        m_reset = re.search(r'resets?\s+in\s+((?:\d+(?:\.\d+)?\s*(?:days?|hours?|minutes?|seconds?|min|sec|[dhms])\s*)+)', text, re.IGNORECASE)
         if m_reset:
-            val = int(m_reset.group(1))
-            unit = (m_reset.group(2) or 'm').lower()
-            if unit.startswith('s'):
-                cooldown_seconds = val
-            elif unit.startswith('h'):
-                cooldown_seconds = val * 3600
-            elif unit.startswith('d'):
-                cooldown_seconds = val * 86400
-            else:
-                cooldown_seconds = val * 60
+            units = {'d': 86400, 'h': 3600, 'm': 60, 's': 1}
+            parsed_secs = max(1, int(sum(float(value) * units[unit[0].lower()]
+                for value, unit in re.findall(r'(\d+(?:\.\d+)?)\s*(days?|hours?|minutes?|seconds?|min|sec|[dhms])',
+                                             m_reset.group(1), re.IGNORECASE))))
+            # Honor the exact reset duration returned by Google's API (5h rolling or 7d weekly window).
+            cooldown_seconds = min(parsed_secs, 604800)
+            has_explicit_reset = True
 
         # Pattern: "retry after (\d+) seconds" or "retry-after: (\d+)"
         m_retry = re.search(r'retry[- ]after[:\s]+(\d+)', text, re.IGNORECASE)
         if m_retry:
-            cooldown_seconds = int(m_retry.group(1))
+            cooldown_seconds = min(int(m_retry.group(1)), 604800)
+            has_explicit_reset = True
 
         # Pattern: ISO timestamp "after 2026-09-20T17:00:00Z"
         m_iso = re.search(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)', text)
@@ -496,13 +705,13 @@ class GoogleAuthPool:
             try:
                 dt = datetime.fromisoformat(parsed_iso.replace('Z', '+00:00'))
                 if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
-                parsed_iso = dt.isoformat()
                 diff = (dt - datetime.now(timezone.utc)).total_seconds()
-                cooldown_seconds = max(60, int(diff))
+                cooldown_seconds = min(max(60, int(diff)), 604800)
+                has_explicit_reset = True
             except Exception:
                 pass
 
-        if not parsed_iso:
+        if not parsed_iso or has_explicit_reset:
             target_dt = datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
             parsed_iso = target_dt.isoformat()
 
@@ -513,31 +722,121 @@ class GoogleAuthPool:
         account_id: str,
         error_text: str,
         cooldown_seconds: int = 1800,
-        reset_time_iso: Optional[str] = None
+        reset_time_iso: Optional[str] = None,
+        model: Optional[str] = None,
     ):
         if account_id in self.accounts:
             acc = self.accounts[account_id]
-            acc.health_state = GoogleAccountHealth.QUOTA_BLOCKED
-            acc.last_error = error_text[:500]
             if not reset_time_iso:
                 dt = datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
                 reset_time_iso = dt.isoformat()
-            acc.cooldown_until = reset_time_iso
+            if is_claude_model(model):
+                acc.claude_health_state = GoogleAccountHealth.QUOTA_BLOCKED
+                acc.claude_last_error = error_text[:500]
+                acc.claude_cooldown_until = reset_time_iso
+            else:
+                acc.health_state = GoogleAccountHealth.QUOTA_BLOCKED
+                acc.last_error = error_text[:500]
+                acc.cooldown_until = reset_time_iso
             acc.updated_at = now()
             self.save()
 
-    def mark_success(self, account_id: str, turn_tokens: int = 0):
+    def mark_transient_error(
+        self,
+        account_id: str,
+        error_text: str,
+        cooldown_seconds: int = 60,
+        model: Optional[str] = None,
+    ):
+        """Transient errors (temporary 429, network blips, 5xx) must not create multi-day cooldowns."""
         if account_id in self.accounts:
             acc = self.accounts[account_id]
-            acc.health_state = GoogleAccountHealth.HEALTHY
-            acc.last_successful_use = now()
-            acc.last_error = None
+            secs = min(max(1, cooldown_seconds), 300)
+            dt = datetime.now(timezone.utc) + timedelta(seconds=secs)
+            if is_claude_model(model):
+                acc.claude_health_state = GoogleAccountHealth.TRANSIENT_ERROR
+                acc.claude_last_error = error_text[:500]
+                acc.claude_cooldown_until = dt.isoformat()
+            else:
+                acc.health_state = GoogleAccountHealth.TRANSIENT_ERROR
+                acc.last_error = error_text[:500]
+                acc.cooldown_until = dt.isoformat()
+            acc.updated_at = now()
+            self.save()
+
+    def mark_auth_verification_required(
+        self,
+        account_id: str,
+        error_text: str
+    ):
+        """Flag account as requiring interactive browser or eligibility verification.
+        Must NOT be treated as quota-blocked, and must not be scheduled until verified.
+        """
+        if account_id in self.accounts:
+            acc = self.accounts[account_id]
+            acc.health_state = GoogleAccountHealth.AUTH_VERIFICATION_REQUIRED
+            acc.last_error = error_text[:500]
             acc.cooldown_until = None
-            for attr, seconds in [('usage_5h', 18000), ('usage_weekly', 604800)]:
+            acc.updated_at = now()
+            self.save()
+
+    def mark_success(self, account_id: str, turn_tokens: int = 0, input_tokens: int = 0, output_tokens: int = 0, cache_read_tokens: int = 0, record_turn: bool = True, model: Optional[str] = None):
+        if account_id in self.accounts:
+            acc = self.accounts[account_id]
+            acc.last_run_error = None
+            is_claude = is_claude_model(model)
+            if not record_turn:
+                if not acc.is_cooldown_active(None):
+                    acc.health_state = GoogleAccountHealth.HEALTHY
+                    acc.last_error = None
+                    acc.cooldown_until = None
+                if not acc.is_cooldown_active('claude'):
+                    acc.claude_health_state = GoogleAccountHealth.HEALTHY
+                    acc.claude_last_error = None
+                    acc.claude_cooldown_until = None
+                acc.updated_at = now()
+                self.save()
+                return
+            out_val = output_tokens or turn_tokens or 0
+            if is_claude:
+                acc.claude_health_state = GoogleAccountHealth.HEALTHY
+                acc.claude_last_successful_use = now()
+                acc.claude_last_error = None
+                acc.claude_cooldown_until = None
+                if input_tokens:
+                    acc.claude_input_tokens += input_tokens
+                if out_val:
+                    acc.claude_output_tokens += out_val
+                if cache_read_tokens:
+                    acc.claude_cache_read_tokens += cache_read_tokens
+                target_attrs = [('claude_usage_5h', 18000), ('claude_usage_weekly', 604800)]
+            else:
+                acc.health_state = GoogleAccountHealth.HEALTHY
+                acc.last_successful_use = now()
+                acc.last_error = None
+                acc.cooldown_until = None
+                if input_tokens:
+                    acc.input_tokens += input_tokens
+                if out_val:
+                    acc.output_tokens += out_val
+                if cache_read_tokens:
+                    acc.cache_read_tokens += cache_read_tokens
+                target_attrs = [('usage_5h', 18000), ('usage_weekly', 604800)]
+            for attr, seconds in target_attrs:
                 usage = getattr(acc, attr) or {}
                 cutoff = datetime.now(timezone.utc).timestamp() - seconds
-                samples = [t for t in usage.get('observed_turns', []) if t > cutoff]
-                samples.append(datetime.now(timezone.utc).timestamp())
+                samples = []
+                for s in usage.get('observed_turns', []):
+                    ts = s.get('t', 0) if isinstance(s, dict) else s
+                    if ts > cutoff:
+                        samples.append(s)
+                samples.append({
+                    't': datetime.now(timezone.utc).timestamp(),
+                    'in': input_tokens,
+                    'out': out_val,
+                    'cache': cache_read_tokens,
+                    'model': model or ('antigravity/claude-opus-4-6-thinking' if is_claude else 'antigravity/gemini-3.8-flash-high'),
+                })
                 setattr(acc, attr, {'turns': len(samples), 'observed_turns': samples,
                                     'source': 'local completed turns; provider quota unknown'})
             acc.updated_at = now()
@@ -550,21 +849,29 @@ class GoogleAuthPool:
     def mark_error(self, account_id: str, error_text: str, is_fatal: bool = False):
         if account_id in self.accounts:
             acc = self.accounts[account_id]
-            authentication_error = any(term in error_text.lower() for term in
-                ('authentication revoked', 'invalid_grant', 'unauthorized', 'invalid credentials', '401 unauthorized'))
-            if (is_fatal or authentication_error) and not self.is_launch_error(error_text):
+            text_lower = error_text.lower()
+            if any(term in text_lower for term in ('eligibility check failed', 'not eligible for antigravity', 'verify your account')):
                 acc.last_error = error_text[:500]
-                acc.health_state = GoogleAccountHealth.ERROR
+                acc.health_state = GoogleAccountHealth.AUTH_VERIFICATION_REQUIRED
+                acc.cooldown_until = None
             else:
-                acc.last_run_error = error_text[:500]
+                authentication_error = any(term in text_lower for term in
+                    ('authentication revoked', 'invalid_grant', 'unauthorized', 'invalid credentials', '401 unauthorized'))
+                if (is_fatal or authentication_error) and not self.is_launch_error(error_text):
+                    acc.last_error = error_text[:500]
+                    acc.health_state = GoogleAccountHealth.ERROR
+                else:
+                    acc.last_run_error = error_text[:500]
             acc.updated_at = now()
             self.save()
 
-    def earliest_reset(self) -> Optional[str]:
+    def earliest_reset(self, model: Optional[str] = None) -> Optional[str]:
         resets = []
+        is_claude = is_claude_model(model)
         for acc in self.accounts.values():
-            if acc.is_cooldown_active() and acc.cooldown_until:
-                resets.append(acc.cooldown_until)
+            cd = acc.claude_cooldown_until if is_claude else acc.cooldown_until
+            if acc.is_cooldown_active(model) and cd:
+                resets.append(cd)
         if resets:
             resets.sort()
             return resets[0]
@@ -645,6 +952,21 @@ class GoogleAuthPool:
             finally:
                 self.credential_lock.release()
 
+    @asynccontextmanager
+    async def launch_lease(self, account_id: str):
+        """Acquires credential lock ONLY during account credential activation and process launch."""
+        while True:
+            await self.login_done.wait()
+            await self.credential_lock.acquire()
+            if not self.login_pending: break
+            self.credential_lock.release()
+        try:
+            if not self.activate_account_credential(account_id):
+                raise RuntimeError('Could not activate saved Google credential; capture its login again')
+            yield
+        finally:
+            self.credential_lock.release()
+
     def retain_refreshed_credential(self, account_id):
         cred = WindowsKeyringHelper.read_credential()
         account = self.accounts[account_id]
@@ -664,8 +986,11 @@ class GoogleAuthPool:
         self.login_pending = None
         self.login_done.set()
 
-    def save_account_credential(self, account_id: str) -> bool:
-        """Captures the current active Windows credential blob into the account's folder."""
+    def save_account_credential(self, account_id: str, allow_replacement: bool = True) -> bool:
+        """Captures the current active Windows credential blob into the account's folder.
+        If allow_replacement is True, signing in with a different Google account replaces
+        the account's email, clears any active quota-block/cooldown, and resets token counters.
+        """
         if account_id not in self.accounts:
             return False
         if self.credential_lock.locked():
@@ -677,14 +1002,39 @@ class GoogleAuthPool:
         if cred:
             username, blob = cred
             email = self._extract_email(blob)
+            if not email:
+                raise ValueError('Could not extract email identity from Google credential')
+
             placeholder = acc.email.startswith('Account ') or acc.email == 'default@google.com'
-            if not email or (not placeholder and email.casefold() != acc.email.casefold()):
-                raise ValueError('Signed-in identity does not match this Google account profile')
+            is_different = email.casefold() != acc.email.casefold()
+
+            if is_different and not placeholder:
+                if not allow_replacement:
+                    raise ValueError('Signed-in identity does not match this Google account profile')
+                # Check for collision with another registered account
+                for other_id, other_acc in self.accounts.items():
+                    if other_id != account_id and other_acc.email.casefold() == email.casefold():
+                        raise ValueError(f"Google account '{email}' is already registered as '{other_id}'. Use that account or remove it first.")
+
             save_credential(auth_dir / 'credential.dat', blob)
-            acc.health_state = GoogleAccountHealth.UNKNOWN
-            email = self._extract_email(blob)
-            if email:
-                acc.email = email
+
+            # If replacing an existing account or bringing in a fresh account, restore healthy state:
+            if is_different or acc.health_state in (GoogleAccountHealth.QUOTA_BLOCKED, GoogleAccountHealth.RATE_LIMITED, GoogleAccountHealth.ERROR):
+                acc.health_state = GoogleAccountHealth.HEALTHY
+                acc.cooldown_until = None
+                acc.last_error = None
+                acc.last_run_error = None
+                # Reset local usage observations for the new identity
+                if is_different:
+                    acc.usage_5h = None
+                    acc.usage_weekly = None
+                    acc.input_tokens = 0
+                    acc.output_tokens = 0
+                    acc.cache_read_tokens = 0
+            else:
+                acc.health_state = GoogleAccountHealth.UNKNOWN
+
+            acc.email = email
             acc.updated_at = now()
             self.save()
             if self.login_pending == account_id: self.cancel_login()
@@ -701,8 +1051,16 @@ class GoogleAuthPool:
         if cred_file.is_file():
             saved = cred_file.read_bytes()
             blob = unprotect(saved)
+            identity = self._extract_email(blob)
+            if not identity or identity.casefold() != acc.email.casefold():
+                raise RuntimeError('Saved Google credential identity does not match its account profile')
             if not saved.startswith(PREFIX): save_credential(cred_file, blob)
-            return WindowsKeyringHelper.write_credential(blob)
+            if not WindowsKeyringHelper.write_credential(blob):
+                return False
+            active = WindowsKeyringHelper.read_credential()
+            if not active or active[1] != blob:
+                raise RuntimeError('Google credential activation could not be verified')
+            return True
         return False
 
     def prepare_login_environment(self, account_id: str, fresh_login: bool = True) -> Tuple[List[str], dict]:

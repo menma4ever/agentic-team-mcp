@@ -112,10 +112,15 @@ async def send_team_message(project_name:str,target_agent_id:str,message:str,is_
 
 
 @mcp_server.tool()
-async def reconfigure_agent(project_name:str,target_agent_id:str,model:str,harness:str,mode:str='after_turn'):
+async def reconfigure_agent(project_name:str,target_agent_id:str,model:str,harness:str,
+                            mode:str='after_turn',reasoning_effort:str|None=None,
+                            provider:str|None=None,name:str|None=None):
     """Switch the same logical agent with a saved handoff. after_turn preserves ongoing execution."""
-    return await act(project_name,'reconfigure_agent',{'target_agent_id':target_agent_id,
-        'model':model,'harness':harness,'mode':mode})
+    args = {'target_agent_id':target_agent_id,'model':model,'harness':harness,'mode':mode}
+    if reasoning_effort is not None: args['reasoning_effort'] = reasoning_effort
+    if provider is not None: args['provider'] = provider
+    if name is not None: args['name'] = name
+    return await act(project_name,'reconfigure_agent',args)
 
 
 @mcp_server.tool()
@@ -151,4 +156,3 @@ async def team_action(project_name:str,action:str,arguments:dict):
 
 def run_mcp_server():
     mcp_server.run()
-

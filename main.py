@@ -4,6 +4,7 @@ import os
 import secrets
 import socket
 import sys
+import time
 import uuid
 import webbrowser
 from pathlib import Path
@@ -16,16 +17,41 @@ def serve(port):
     from engine.orchestrator import Orchestrator
     from web.app import create_app
     # Claim the port before publishing any credentials/state.
-    sock=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-    if hasattr(socket,'SO_EXCLUSIVEADDRUSE'): sock.setsockopt(socket.SOL_SOCKET,socket.SO_EXCLUSIVEADDRUSE,1)
-    sock.bind(('127.0.0.1',port))
+    deadline = time.time() + 35
+    while True:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            try:
+                if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                sock.bind(('127.0.0.1', port))
+            except (OSError, PermissionError):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(('127.0.0.1', port))
+            break
+        except (OSError, PermissionError):
+            sock.close()
+            if time.time() >= deadline:
+                raise
+            time.sleep(0.5)
     sock.listen(128)
     instance=uuid.uuid4().hex
+    DATA_DIR.mkdir(parents=True,exist_ok=True)
     # A controlled idle upgrade can retain existing browser/MCP owner sessions.
     # Consume this environment variable here so model subprocesses never inherit it.
-    token=os.environ.pop('TEAM_OWNER_TOKEN', None) or secrets.token_urlsafe(40)
+    token=os.environ.pop('TEAM_OWNER_TOKEN', None)
+    token_file = DATA_DIR / 'owner_token.secret'
+    if not token and token_file.is_file():
+        try:
+            candidate = token_file.read_text(encoding='utf-8').strip()
+            if candidate: token = candidate
+        except Exception: pass
+    if not token:
+        token = secrets.token_urlsafe(40)
+        try:
+            token_file.write_text(token, encoding='utf-8')
+        except Exception: pass
     endpoint=f'http://127.0.0.1:{port}'
-    DATA_DIR.mkdir(parents=True,exist_ok=True)
     engine=Orchestrator()
     engine.endpoint=endpoint
     app=create_app(engine,token,instance)
@@ -71,4 +97,3 @@ def main():
 
 if __name__=='__main__':
     main()
-

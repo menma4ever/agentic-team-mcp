@@ -22,8 +22,8 @@ class SystemSettings(BaseModel):
         'claude': 'claude', 'codex': 'codex', 'agy': 'agy', 'gemini': 'gemini',
         'hermes': 'hermes', 'openclaw': 'openclaw'})
     cli_auth_enabled: Dict[str, bool] = Field(default_factory=dict)
-    default_ceo_model: str = 'gemini/gemini-2.5-pro'
-    default_manager_model: str = 'gemini/gemini-2.5-flash'
+    default_ceo_model: str = 'antigravity/claude-opus-4-6-thinking'
+    default_manager_model: str = 'antigravity/gemini-3.8-flash-high'
     inactivity_timeout_seconds: int = Field(default=1800, ge=10)
     heartbeat_interval_seconds: int = Field(default=15, ge=1)
     max_tool_rounds: int = Field(default=40, ge=1, le=200)
@@ -59,6 +59,8 @@ class SystemSettings(BaseModel):
             'siliconflow': ['SILICONFLOW_API_KEY', 'SILICON_API_KEY'],
             'together': ['TOGETHER_API_KEY', 'TOGETHERAI_API_KEY'],
             'zai': ['ZAI_API_KEY', 'GLM_API_KEY'],
+            'experiential': ['EXPERIENTIALLABS_API_KEY', 'XPL_API_KEY', 'EXPERIENTIAL_API_KEY'],
+            'xpl': ['XPL_API_KEY', 'EXPERIENTIALLABS_API_KEY', 'EXPERIENTIAL_API_KEY'],
         }
         return self.api_keys.get(provider) or next((os.environ[k] for k in
             envs.get(provider, [provider.upper() + '_API_KEY']) if os.environ.get(k)), None)
@@ -69,8 +71,13 @@ class SystemSettings(BaseModel):
         explicit = Path(configured)
         if explicit.is_absolute() and explicit.is_file() and os.access(explicit, os.X_OK):
             return str(explicit)
+        if name == 'codex' and os.name == 'nt':
+            local_app_data = Path(os.environ.get('LOCALAPPDATA', ''))
+            candidates = sorted(list((local_app_data / 'OpenAI' / 'Codex' / 'bin').glob('*/codex.exe')), key=lambda x: x.stat().st_mtime, reverse=True)
+            if candidates:
+                return str(candidates[0])
         path = shutil.which(configured)
-        if not path and name == 'agy' and configured == 'agy' and os.name == 'nt':
+        if not path and name == 'agy' and os.name == 'nt':
             candidate = Path(os.environ.get('LOCALAPPDATA', '')) / 'agy' / 'bin' / 'agy.exe'
             if candidate.is_file():
                 path = str(candidate)
@@ -85,7 +92,8 @@ class SystemSettings(BaseModel):
         text = str(value)
         keys_to_redact = set(v for v in self.api_keys.values() if v)
         for p in ('openai', 'anthropic', 'gemini', 'openrouter', 'groq', 'deepseek',
-                  'qwen', 'minimax', 'moonshot', 'siliconflow', 'together', 'mistral', 'zai'):
+                  'qwen', 'minimax', 'moonshot', 'siliconflow', 'together', 'mistral', 'zai',
+                  'experiential', 'xpl'):
             k = self.get_api_key(p)
             if k:
                 keys_to_redact.add(k)

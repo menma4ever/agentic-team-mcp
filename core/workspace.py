@@ -73,6 +73,16 @@ class WorkspaceManager:
             return True
         return False
 
+    def delete_project_dir(self, name: str) -> bool:
+        target = self.get_project_dir(name)
+        if target.parent != self.root_dir.resolve() or target == self.root_dir.resolve():
+            raise ValueError('Unsafe project deletion target')
+        if target.exists():
+            shutil.rmtree(target)
+            return True
+        return False
+
 
 workspace_mgr = WorkspaceManager()
+
 

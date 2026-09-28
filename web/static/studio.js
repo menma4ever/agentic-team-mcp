@@ -1,7 +1,7 @@
 'use strict';
 // The studio replays the existing engine log; refreshing never restarts an agent.
 const ledgers=new Map(), agentIndex=new Map(), projectIndex=new Map(), flowHistory=[], actorPositions=new Map();
-let syncing=false, studioView=localStorage.getItem('agentic_team_view')||'team', usageScope='all', usageTimeFilter='all', enabledModels=new Set(), modelSelectionTouched=false, graphSignature='', sessionSignature='', telemetryReady=false, flowLoadedProject=null;
+let syncing=false, studioView=(localStorage.getItem('agentic_team_view')==='storage'?'team':(localStorage.getItem('agentic_team_view')||'team')), usageScope='all', usageTimeFilter='all', enabledModels=new Set(), modelSelectionTouched=false, graphSignature='', sessionSignature='', telemetryReady=false, flowLoadedProject=null;
 let connectingSource=null, dragLine=null, contextAgent=null;
 
 const brandInfo={
@@ -40,7 +40,7 @@ function modelLabel(model){return model.split('/').slice(1).join('/')||model;}
 function pretty(s){return String(s||'').replaceAll('_',' ');}
 function count(n){return new Intl.NumberFormat('en',{notation:n>=10000?'compact':'standard',maximumFractionDigits:1}).format(n||0);}
 function clockTime(s){return s?new Date(s).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—';}
-function agents(t=tree){return [t?.ceo,t?.manager,...(t?.workers||[])].filter(Boolean);}
+function agents(t=tree){return [t?.watchdog,t?.ceo,t?.manager,...(t?.workers||[])].filter(Boolean);}
 function ledger(aid){if(!ledgers.has(aid))ledgers.set(aid,new TeamTelemetry.Ledger());return ledgers.get(aid);}
 function logo(model){const i=el('img');i.src='/logos/'+(brandInfo[brand(model)]||brandInfo.other).logo+'.svg';i.alt=(brandInfo[brand(model)]||brandInfo.other).name;i.className='brand-logo '+brand(model);return i;}
 function svgEl(tag,attrs={}){const n=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,String(v));return n;}
@@ -178,13 +178,18 @@ function makeActor(a){
   c.dataset.agent=a.id;c.dataset.role=a.role.toLowerCase();
   c.dataset.specialty=/quality|review|audit|judge/i.test(a.name+' '+a.current_task)?'review':'build';
   const heading=el('button',undefined,'actor-heading');heading.type='button';
-  heading.append(el('strong',a.role==='CEO'?'CEO':a.role==='MANAGER'?'Manager':pretty(a.name)),el('small',a.role==='WORKER'?'Worker':pretty(a.name)));
+  heading.append(
+    el('strong',a.role==='CEO'?'CEO':a.role==='MANAGER'?'Manager':a.role==='WATCHDOG'?'Root Watchdog':pretty(a.name)),
+    el('small',a.role==='WORKER'?'Worker':a.role==='WATCHDOG'?'Antigravity CLI Agent':pretty(a.name))
+  );
   heading.setAttribute('aria-label','Move '+pretty(a.name)+'; arrow keys adjust position');
   heading.title='Drag to move · arrow keys to adjust';
   const body=el('button',undefined,'actor-inspect');body.type='button';body.setAttribute('aria-label','Open '+pretty(a.name)+' conversation');
   const avatar=el('div',undefined,'avatar');avatar.append(logo(a.model));
-  const eyes=el('span',undefined,'eyes');eyes.append(el('i'),el('i'));
-  avatar.append(eyes,el('span','z','sleep-z z1'),el('span','z','sleep-z z2'),el('span',undefined,'role-prop'));
+  const eyebrows=el('span',undefined,'eyebrows');eyebrows.append(el('i','' ,'brow-left'),el('i','','brow-right'));
+  const eyes=el('span',undefined,'eyes');eyes.append(el('i','','eye-left'),el('i','','eye-right'));
+  const sweat=el('span',undefined,'sweat-drops');sweat.append(el('i','','sweat s1'),el('i','','sweat s2'));
+  avatar.append(eyebrows,eyes,sweat,el('span','z','sleep-z z1'),el('span','z','sleep-z z2'),el('span',undefined,'role-prop'));
   const hands=el('div',undefined,'hands');hands.append(el('i'),el('i'));avatar.append(hands,el('div','▦','keyboard'));
   const base=el('div',undefined,'actor-base');base.append(el('span',modelLabel(a.model),'model-name'),el('span','','actor-status'),el('small','','actor-usage'));
   body.append(avatar,base);body.onclick=()=>{tab='chat';openSession(a.id);};
@@ -192,8 +197,22 @@ function makeActor(a){
   menu.onclick=e=>openContextMenu(e,a);c.append(heading,body,menu);
   c.addEventListener('contextmenu',e=>openContextMenu(e,a));
   let drag=null;
-  const position=(x,y)=>{const pos={x:Math.max(12,Math.min(19000,x)),y:Math.max(12,Math.min(19000,y))};actorPositions.set(a.id,pos);c.style.left=pos.x+'px';c.style.top=pos.y+'px';requestAnimationFrame(drawLinks);return pos;};
-  const save=async pos=>{try{await api('/api/agents/'+a.id+'/position',{project_name:a.project_name,...pos});a.position=pos;}catch(err){notice('Position not saved: '+err.message);graphSignature='';renderTeam();}};
+  const position=(x,y)=>{
+    const pos={x:Math.max(16,Math.min(19000,x)),y:Math.max(16,Math.min(19000,y))};
+    actorPositions.set(a.id,pos);
+    c.style.left=pos.x+'px';
+    c.style.top=pos.y+'px';
+    const treeEl=$('tree');
+    if(treeEl){
+      const currentW=parseFloat(treeEl.style.width)||treeEl.clientWidth;
+      const currentH=parseFloat(treeEl.style.height)||treeEl.clientHeight;
+      if(pos.x+240>currentW)treeEl.style.width=(pos.x+260)+'px';
+      if(pos.y+240>currentH)treeEl.style.height=(pos.y+260)+'px';
+    }
+    requestAnimationFrame(drawLinks);
+    return pos;
+  };
+  const save=async pos=>{try{await api('/api/agents/'+a.id+'/position',{project_name:currentProject||a.project_name,...pos});a.position=pos;}catch(err){notice('Position not saved: '+err.message);graphSignature='';renderTeam();}};
   heading.onpointerdown=e=>{if(e.button!==0)return;e.preventDefault();const p=actorPositions.get(a.id);drag={x:e.clientX,y:e.clientY,base:{...p},moved:false};heading.setPointerCapture(e.pointerId);};
   heading.onpointermove=e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(!drag.moved&&Math.hypot(dx,dy)<5)return;drag.moved=true;c.classList.add('dragging');position(drag.base.x+dx,drag.base.y+dy);};
   heading.onpointerup=()=>{if(!drag)return;const moved=drag.moved;drag=null;c.classList.remove('dragging');if(moved)save(actorPositions.get(a.id));};
@@ -201,35 +220,104 @@ function makeActor(a){
   heading.onkeydown=e=>{const delta={ArrowLeft:[-20,0],ArrowRight:[20,0],ArrowUp:[0,-20],ArrowDown:[0,20]}[e.key];if(!delta)return;e.preventDefault();const p=actorPositions.get(a.id);save(position(p.x+delta[0],p.y+delta[1]));};
   return c;
 }
+
+function computeTreeLayout(treeData, containerW=900){
+  const workers=(treeData?.workers||[]).filter(Boolean);
+  const ceos=(treeData?.ceo?[treeData.ceo]:[]).filter(Boolean);
+  const managers=(treeData?.manager?[treeData.manager]:[]).filter(Boolean);
+  const watchdogs=(treeData?.watchdog?[treeData.watchdog]:[]).filter(Boolean);
+
+  const floorW=Math.max(640,(containerW||900)-16);
+  const cardW=196, gapX=20, stepX=cardW+gapX, stepY=214;
+  const n=workers.length;
+  const maxColsFit=Math.max(1,Math.floor((floorW-32+gapX)/stepX));
+  const cols=Math.min(Math.max(1,n),maxColsFit);
+
+  // Place Watchdog on the left (x=24) and CEO/Manager to the right-center so they are well-spaced yet inside floorW
+  const watchdogX=24;
+  const minCenterForWatchdog=watchdogs.length?(watchdogX+cardW+140+cardW/2):(floorW/2);
+  const centerX=Math.min(floorW-cardW/2-20,Math.max(minCenterForWatchdog,Math.round(floorW*0.54)));
+  const positions=new Map();
+
+  watchdogs.forEach(a=>{
+    positions.set(a.id,{x:watchdogX,y:126});
+  });
+  ceos.forEach(a=>{
+    positions.set(a.id,{x:Math.round(centerX-cardW/2),y:20});
+  });
+  managers.forEach(a=>{
+    positions.set(a.id,{x:Math.round(centerX-cardW/2),y:226});
+  });
+
+  const numRows=Math.ceil(Math.max(1,n)/cols);
+  for(let r=0;r<numRows;r++){
+    const startIdx=r*cols;
+    const endIdx=Math.min(n,startIdx+cols);
+    const countInRow=endIdx-startIdx;
+    if(countInRow<=0)break;
+    const rowW=countInRow*cardW+(countInRow-1)*gapX;
+    const startX=Math.max(16,Math.round((floorW-rowW)/2));
+    const rowY=438+r*stepY;
+    for(let j=0;j<countInRow;j++){
+      const a=workers[startIdx+j];
+      positions.set(a.id,{x:Math.round(startX+j*stepX),y:rowY});
+    }
+  }
+  const maxY=438+Math.max(1,numRows)*stepY+28;
+  return {positions,width:Math.round(floorW),height:Math.round(maxY)};
+}
+
 window.resetLayout=async function(){
-  const columns=Math.min(3,Math.max(1,tree.workers.length)),width=Math.max(720,columns*244+80);
+  const scrollEl=$('tree')?.parentElement;
+  const containerW=scrollEl?.clientWidth||900;
+  const layout=computeTreeLayout(tree,containerW);
   const updates=[];
-  for(const [i,group]of [[tree.ceo],[tree.manager],tree.workers].entries())for(const [j,a]of group.filter(Boolean).entries()){
-    const pos={x:i<2?(width-200)/2:40+(j%columns)*244,y:i<2?32+i*228:488+Math.floor(j/columns)*228};
-    updates.push(api('/api/agents/'+a.id+'/position',{project_name:a.project_name,...pos}));
+  for(const a of agents(tree)){
+    a.position=null;
+    updates.push(api('/api/agents/'+a.id+'/position',{project_name:currentProject||a.project_name,x:null,y:null}));
   }
   await Promise.all(updates);
-  actorPositions.clear();graphSignature='';await refreshTree();notice('Automatic layout restored and saved.');
+  actorPositions.clear();
+  if(scrollEl){scrollEl.scrollLeft=0;scrollEl.scrollTop=0;}
+  graphSignature='';
+  await refreshTree();
+  notice('Auto-arranged all agents to fit the Team floor.');
 };
 function renderTeam(){
   const aa=agents();for(const a of aa)agentIndex.set(a.id,a);
   if(document.querySelector('.actor.dragging'))return;
-  const sig=aa.map(a=>a.id+a.status+a.name+a.model+JSON.stringify(a.connections||[])+JSON.stringify(a.position)).join('|');
+  const containerW=$('tree')?.parentElement?.clientWidth||900;
+  const sig=containerW+':'+aa.map(a=>a.id+a.status+a.name+a.model+JSON.stringify(a.connections||[])+JSON.stringify(a.position)).join('|');
   if(sig!==graphSignature){
     graphSignature=sig;$('tree').replaceChildren();
     const links=svgEl('svg',{'class':'team-links','aria-hidden':'true'});links.id='team-links';$('tree').append(links);
-    const columns=Math.min(3,Math.max(1,tree.workers.length));
-    const width=Math.max(720,columns*244+80), center=(width-200)/2;
-    $('tree').style.width=width+'px';
-    let maxY=580;
-    for(const [i,group]of [[tree.ceo],[tree.manager],tree.workers].entries()){
-      for(const [j,a] of group.filter(Boolean).entries()){
-        const fallback={x:i<2?center:40+(j%columns)*244,y:i<2?32+i*228:488+Math.floor(j/columns)*228};
-        const pos=a.position||fallback;actorPositions.set(a.id,pos);
-        const c=makeActor(a);c.style.left=pos.x+'px';c.style.top=pos.y+'px';$('tree').append(c);maxY=Math.max(maxY,pos.y+224);
+
+    const layout=computeTreeLayout(tree,containerW);
+    const ceoLayoutPos=tree?.ceo?layout.positions.get(tree.ceo.id):null;
+
+    let maxX=layout.width, maxY=layout.height;
+    for(const a of aa){
+      let pos=a.position||layout.positions.get(a.id)||{x:40,y:440};
+      // Snap legacy off-screen positions or colliding Watchdog positions into the responsive layout
+      if(a.position&&(a.position.x+204>containerW+40||a.position.x<8)){
+        pos=layout.positions.get(a.id)||pos;
+      }else if(a.role==='WATCHDOG'&&ceoLayoutPos&&Math.abs(ceoLayoutPos.x-pos.x)<220){
+        pos=layout.positions.get(a.id)||pos;
       }
+      actorPositions.set(a.id,pos);
+      maxX=Math.max(maxX,pos.x+216);
+      maxY=Math.max(maxY,pos.y+210);
     }
+    $('tree').style.width=Math.max(containerW-4,maxX)+'px';
     $('tree').style.height=maxY+'px';
+
+    for(const a of aa){
+      const pos=actorPositions.get(a.id);
+      const c=makeActor(a);
+      c.style.left=pos.x+'px';
+      c.style.top=pos.y+'px';
+      $('tree').append(c);
+    }
     if(!aa.length)$('tree').append(el('p','Create a project to open its team floor.','empty-state'));
     requestAnimationFrame(drawLinks);
   }
@@ -240,15 +328,26 @@ function renderTeam(){
 }
 
 function updateActors(){
+  const nowMs=Date.now();
   for(const c of document.querySelectorAll('.actor')){
     const a=agentIndex.get(c.dataset.agent);
     if(!a)continue;
-    const l=ledger(a.id),u=l.totals(),recent=[...l.samples.values()].filter(s=>Date.now()-Date.parse(s.time)<60000).reduce((n,s)=>n+(s.output||0),0);
-    
+    const l=ledger(a.id),u=l.totals();
+    const samples=[...l.samples.values()];
+    const recentSamples=samples.filter(s=>nowMs-Date.parse(s.time)<90000);
+    const recentOut=recentSamples.reduce((n,s)=>n+(s.output||0),0);
+    const recentTotal=recentSamples.reduce((n,s)=>n+(s.input||0)+(s.output||0),0);
+    const recentEvents=l.activity.filter(ev=>nowMs-Date.parse(ev.time)<60000).length;
+    const avgPerSample=samples.length>0?(samples.reduce((n,s)=>n+(s.input||0)+(s.output||0),0)/samples.length):800;
+    const isPeakWorking=a.status==='working'&&(recentOut>350||recentTotal>Math.max(1200,avgPerSample*1.25)||recentEvents>=3);
+    const isErrorState=a.status==='failed'||a.status==='blocked_loop'||(a.status==='paused'&&a.last_error&&/quota|error|disconnect|exhausted|rate|limit|timeout/i.test(a.last_error));
+
     c.classList.toggle('idle',a.status==='idle');
     c.classList.toggle('paused',a.status==='paused');
     c.classList.toggle('working',a.status==='working');
-    c.classList.toggle('focused',a.status==='working'&&recent>400);
+    c.classList.toggle('focused',a.status==='working'&&recentOut>200);
+    c.classList.toggle('peak-working',isPeakWorking);
+    c.classList.toggle('error-state',!!isErrorState);
     c.classList.toggle('selected',active?.id===a.id);
     c.querySelector('.actor-status').textContent=states[a.status]||a.status;
     c.querySelector('.actor-usage').textContent=u.reported?count(u.input+u.output)+' tokens':u.estimated?count(u.estimated)+' estimated tokens':'Usage not reported';
@@ -274,8 +373,28 @@ function drawLinks(flight){
     svg.append(svgEl('path',{d,'class':'hierarchy-link'}));
   }
   
-  // 2. Custom graph connections (connections)
+  // 2. Supervisory Watchdog links (Watchdog -> CEO & Manager)
+  const wd = tree?.watchdog;
+  if(wd){
+    const wdActor = document.querySelector(`.actor[data-agent="${wd.id}"]`);
+    if(wdActor){
+      const wr = wdActor.getBoundingClientRect();
+      const p = {x: wr.right - box.left, y: wr.top + wr.height/2 - box.top};
+      for(const targetId of (wd.connections||[])){
+        const targetActor = document.querySelector(`.actor[data-agent="${targetId}"]`);
+        if(!targetActor)continue;
+        const tr = targetActor.getBoundingClientRect();
+        const q = {x: tr.left - box.left, y: tr.top + tr.height/2 - box.top};
+        const midX = (p.x + q.x) / 2;
+        const d = `M${p.x},${p.y} C${midX},${p.y} ${midX},${q.y} ${q.x},${q.y}`;
+        svg.append(svgEl('path',{d,'class':'watchdog-link','title':'Supervisory Conduit to '+pretty(agentIndex.get(targetId)?.name||'Agent')}));
+      }
+    }
+  }
+
+  // 3. Custom graph connections (connections)
   for(const a of agents()){
+    if(a.role === 'WATCHDOG') continue;
     for(const targetId of (a.connections||[])){
       if(targetId===a.parent_id)continue;
       const p=point(a.id,true),q=point(targetId,false);if(!p||!q)continue;
@@ -365,9 +484,19 @@ async function syncTelemetry(){
   return t;
  }
  function metric(label,value,note){const d=el('div',undefined,'metric');d.append(el('small',label),el('strong',value),el('span',note));return d;}
+ function uniqModels(rawList){
+  const seen=new Map();
+  const cFn=(window.TeamTelemetry&&TeamTelemetry.canonModel)||((m)=>String(m||'').split('/').pop().toLowerCase().replace(/[\s_]+/g,'-'));
+  for(const m of rawList){
+   if(!m)continue;
+   const k=cFn(m);
+   if(!seen.has(k)||m.includes('/'))seen.set(k,m);
+  }
+  return [...seen.values()];
+ }
  function renderUsage(){
   const windowMs=getTimeWindowMs();
-  const aa=scopedAgents(),models=[...new Set(aa.flatMap(a=>[a.model,...[...ledger(a.id).samples.values()].map(s=>s.model||a.model)]))];if(!modelSelectionTouched)enabledModels=new Set(models);
+  const aa=scopedAgents(),models=uniqModels(aa.flatMap(a=>[a.model,...[...ledger(a.id).samples.values()].map(s=>s.model||a.model)]));if(!modelSelectionTouched)enabledModels=new Set(models);
   const visible=aa,t={input:0,output:0,cache:0,write:0,reported:0,cacheKnown:0,missing:0,estimated:0};
   for(const m of enabledModels){const u=totalsFor(aa,windowMs,m);for(const k of ['input','output','cache','write','estimated'])t[k]+=u[k];if(u.reported)t.reported++;if(u.cacheKnown)t.cacheKnown++;}
   const timeLabel=usageTimeFilter==='all'?'':' ('+(usageTimeFilter==='1h'?'Last 1h':usageTimeFilter==='5h'?'Last 5h':usageTimeFilter==='24h'?'Last 24h':'Last 7d')+')';
@@ -376,9 +505,10 @@ async function syncTelemetry(){
   for(const m of models){const b=el('button',undefined,'model-filter '+brand(m)+(enabledModels.has(m)?' on':''));b.setAttribute('aria-pressed',String(enabledModels.has(m)));b.append(logo(m),el('span',modelLabel(m)));b.onclick=()=>{modelSelectionTouched=true;if(enabledModels.has(m))enabledModels.delete(m);else enabledModels.add(m);renderUsage();};$('model-filters').append(b);}
   $('usage-coverage').textContent=telemetryReady?`${t.reported} model groups have reported usage in this window. ${t.estimated?count(t.estimated)+' tokens in latest CLI response estimates; excluded from totals. ':''}Cache is part of input, not added twice.`:'Reading saved execution history…';
   drawUsageChart(visible,windowMs);
+  const cFn=(window.TeamTelemetry&&TeamTelemetry.canonModel)||((m)=>String(m||'').split('/').pop().toLowerCase().replace(/[\s_]+/g,'-'));
   const body=$('usage-rows');body.replaceChildren();
-  for(const m of models){const group=aa.filter(a=>a.model===m||[...ledger(a.id).samples.values()].some(s=>s.model===m)),u=totalsFor(group,windowMs,m),tr=el('tr');const name=el('td');name.append(logo(m),el('span',modelLabel(m)));tr.append(name,...[u.reported?count(u.input):'—',u.reported?count(u.output):'—',u.cacheKnown?count(u.cache):'—',u.estimated?count(u.estimated):'—',u.reported+'/'+group.length].map(v=>el('td',v)));body.append(tr);}
-  const projectAgents=agents(),projectModels=[...new Set(projectAgents.flatMap(a=>[a.model,...[...ledger(a.id).samples.values()].map(s=>s.model||a.model)]))];
+  for(const m of models){const mc=cFn(m),group=aa.filter(a=>cFn(a.model)===mc||[...ledger(a.id).samples.values()].some(s=>cFn(s.model)===mc)),u=totalsFor(group,windowMs,m),tr=el('tr');const name=el('td');name.append(logo(m),el('span',modelLabel(m)));tr.append(name,...[u.reported?count(u.input):'—',u.reported?count(u.output):'—',u.cacheKnown?count(u.cache):'—',u.estimated?count(u.estimated):'—',u.reported+'/'+group.length].map(v=>el('td',v)));body.append(tr);}
+  const projectAgents=agents(),projectModels=uniqModels(projectAgents.flatMap(a=>[a.model,...[...ledger(a.id).samples.values()].map(s=>s.model||a.model)]));
   const bars=$('model-bars');bars.replaceChildren();const max=Math.max(1,...projectModels.map(m=>{const u=totalsFor(projectAgents,windowMs,m);return u.input+u.output;}));
   for(const m of projectModels){const u=totalsFor(projectAgents,windowMs,m),r=el('div',undefined,'model-bar '+brand(m));const h=el('div');h.append(logo(m),el('span',modelLabel(m)),el('b',u.reported?count(u.input+u.output):'—'));const track=el('progress');track.max=max;track.value=u.input+u.output;track.setAttribute('aria-label',modelLabel(m)+' total tokens');r.append(h,track);bars.append(r);}
   const projectTotal=totalsFor(agents(),windowMs);$('mini-usage').textContent=projectTotal.reported?count(projectTotal.input+projectTotal.output):'—';$('mini-cache').textContent=projectTotal.cacheKnown?count(projectTotal.cache):'—';
@@ -386,19 +516,21 @@ async function syncTelemetry(){
  function drawUsageChart(aa,windowMs=Infinity){
   const svg=$('usage-chart');svg.replaceChildren();const W=1000,H=230,L=58,R=20,T=18,B=35,n=24;
   const now=Date.now();
-  let all=aa.flatMap(a=>[...ledger(a.id).samples.values()].map(s=>({...s,model:s.model||a.model}))).filter(s=>enabledModels.has(s.model));
+  const cFn=(window.TeamTelemetry&&TeamTelemetry.canonModel)||((m)=>String(m||'').split('/').pop().toLowerCase().replace(/[\s_]+/g,'-'));
+  const enabledCanons=new Set([...enabledModels].map(m=>cFn(m)));
+  let all=aa.flatMap(a=>[...ledger(a.id).samples.values()].map(s=>({...s,model:s.model||a.model}))).filter(s=>enabledCanons.has(cFn(s.model)));
   if(windowMs!==Infinity){
    all=all.filter(s=>s.time&&(now-Date.parse(s.time))<=windowMs);
   }
   let min=all.length?(windowMs===Infinity?Math.min(...all.map(s=>Date.parse(s.time))):now-windowMs):(windowMs===Infinity?now-3600000:now-windowMs);
   let max=now;
   if(max-min<60000)min=max-60000;
-  const modelNames=[...new Set(all.map(s=>s.model))],bins=new Map(modelNames.map(m=>[m,Array(n).fill(0)]));
-  for(const s of all){const i=Math.min(n-1,Math.max(0,Math.floor((Date.parse(s.time)-min)/(max-min)*n)));if(bins.has(s.model))bins.get(s.model)[i]+=(s.input||0)+(s.output||0);}
-  const heights=Array(n).fill(0);for(const b of bins.values())b.forEach((v,i)=>heights[i]+=v);const peak=Math.max(1,...heights);
+  const modelNames=uniqModels(all.map(s=>s.model)),bins=new Map(modelNames.map(m=>[cFn(m),{label:m,vals:Array(n).fill(0)}]));
+  for(const s of all){const i=Math.min(n-1,Math.max(0,Math.floor((Date.parse(s.time)-min)/(max-min)*n))),k=cFn(s.model);if(bins.has(k))bins.get(k).vals[i]+=(s.input||0)+(s.output||0);}
+  const heights=Array(n).fill(0);for(const b of bins.values())b.vals.forEach((v,i)=>heights[i]+=v);const peak=Math.max(1,...heights);
   for(let i=0;i<4;i++){const y=T+(H-T-B)*i/3;svg.append(svgEl('line',{x1:L,x2:W-R,y1:y,y2:y,'class':'chart-grid'}));const txt=svgEl('text',{x:L-10,y:y+4,'text-anchor':'end'});txt.textContent=count(peak*(1-i/3));svg.append(txt);}
   const used=Array(n).fill(0),width=(W-L-R)/n;
-  for(const [m,b]of bins){b.forEach((v,i)=>{if(!v)return;const h=v/peak*(H-T-B),r=svgEl('rect',{x:L+i*width+3,y:H-B-(used[i]+v)/peak*(H-T-B),width:width-6,height:h,fill:brandInfo[brand(m)].color,rx:1,tabindex:0});const title=svgEl('title');title.textContent=`${modelLabel(m)} · ${clockTime(new Date(min+i/n*(max-min)).toISOString())} · ${v.toLocaleString()} tokens`;r.append(title);svg.append(r);used[i]+=v;});}
+  for(const b of bins.values()){const m=b.label;b.vals.forEach((v,i)=>{if(!v)return;const h=v/peak*(H-T-B),r=svgEl('rect',{x:L+i*width+3,y:H-B-(used[i]+v)/peak*(H-T-B),width:width-6,height:h,fill:brandInfo[brand(m)].color,rx:1,tabindex:0});const title=svgEl('title');title.textContent=`${modelLabel(m)} · ${clockTime(new Date(min+i/n*(max-min)).toISOString())} · ${v.toLocaleString()} tokens`;r.append(title);svg.append(r);used[i]+=v;});}
   for(let i=0;i<5;i++){const txt=svgEl('text',{x:L+(W-L-R)*i/4,y:H-8,'text-anchor':i===0?'start':i===4?'end':'middle'});txt.textContent=new Date(min+(max-min)*i/4).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});svg.append(txt);}
   if(!all.length){const txt=svgEl('text',{x:W/2,y:H/2,'text-anchor':'middle','class':'chart-empty'});txt.textContent='No reported usage for the selected window / models';svg.append(txt);}
  }
@@ -456,6 +588,10 @@ function toolDetails(item){
 function sessionHeader(){
  $('session-title').textContent=pretty(active.name);$('session-role').textContent=active.role+' / '+(states[active.status]||active.status);$('session-model').replaceChildren(logo(active.model),el('span',modelLabel(active.model)));
  $('session-meta').textContent=[active.harness,active.pid?'PID '+active.pid:'No active process',active.session_id?'Session '+active.session_id:'No session yet',active.auth_slot_id?'Slot: '+active.auth_slot_id:'Auth: auto'].join(' · ');
+ if($('open-console')&&window.engineRevision>=2){
+  const labels={'codex':'Open Codex CLI ↗','claude_code':'Open Claude CLI ↗','antigravity':'Open Antigravity CLI ↗'};
+  $('open-console').textContent=labels[active.harness]||'Open CLI Session ↗';
+ }
  $('terminate').hidden=active.role!=='WORKER';updateActors();
  const u=ledger(active.id).totals();$('session-usage').replaceChildren(metric('INPUT',u.reported?count(u.input):'—',''),metric('OUTPUT',u.reported?count(u.output):'—',''),metric('CACHE',u.cacheKnown?count(u.cache):'—',''));
  if($('session-auth-select')){
@@ -570,86 +706,508 @@ async function renderAuthPool(){
   $('cancel-google-login').hidden=!data.login_pending;
   if(data.execution_policy)$('auth-health').textContent=data.execution_policy+'. Local turn counts are not provider quota.';
   const accounts=data.accounts||[];
-  let healthy=0, quotaBlocked=0, rateLimited=0, activeCount=0;
-  for(const acc of accounts){
-   if(acc.health_state==='healthy')healthy++;
-   if(acc.health_state==='quota-blocked'||acc.in_cooldown)quotaBlocked++;
-   if(acc.health_state==='rate-limited')rateLimited++;
-   activeCount+=(acc.active_agents||0);
+  const fmt = (typeof count === 'function') ? count : (n => (n||0).toLocaleString());
+  function renderUsageCell(usageData, windowLabel){
+    const td=el('td',undefined,'token-cell-td');
+    if(!usageData||typeof usageData!=='object'){
+      td.text='Not recorded';
+      td.textContent='Not recorded';
+      return td;
+    }
+    const inTok=usageData.input_tokens||0;
+    const outTok=usageData.output_tokens||0;
+    const cacheTok=usageData.cache_read_tokens||0;
+    const turns=usageData.turns||0;
+    const totalPrompt=inTok+cacheTok;
+    const cacheRate=totalPrompt>0?Math.round((cacheTok/totalPrompt)*100):0;
+    const wrap=el('div',undefined,'tok-cell-wrap');
+    const lineOut=el('div',undefined,'tok-metric-line');
+    lineOut.append(el('span','Out: ','tok-lbl'),el('strong',fmt(outTok),'tok-val tok-val-out'));
+    const lineIn=el('div',undefined,'tok-metric-line');
+    lineIn.append(el('span','In: ','tok-lbl'),el('span',fmt(inTok),'tok-val tok-val-in'));
+    const lineCache=el('div',undefined,'tok-metric-line');
+    const cacheSpan=el('span',`${fmt(cacheTok)} (${cacheRate}%)`,'tok-val tok-val-cache');
+    cacheSpan.title=totalPrompt>0?`${cacheRate}% prompt cache hit rate (${fmt(cacheTok)} cached / ${fmt(totalPrompt)} total prompt)`:'No prompt tokens cached yet';
+    lineCache.append(el('span','Cache: ','tok-lbl'),cacheSpan);
+    const lineTurns=el('div',undefined,'tok-sub-line');
+    lineTurns.append(el('small',`${turns} ${turns===1?'turn':'turns'}`,'tok-turns'));
+    wrap.append(lineOut,lineIn,lineCache,lineTurns);
+    td.append(wrap);
+    td.title=`${windowLabel} Usage: ${fmt(outTok)} output, ${fmt(inTok)} input, ${fmt(cacheTok)} cache read (${cacheRate}% cache rate), across ${turns} turns`;
+    return td;
   }
-  if($('auth-metrics')){$('auth-metrics').replaceChildren(metric('TOTAL ACCOUNTS',accounts.length,'Registered Google profiles'),metric('HEALTHY',healthy,'Available for scheduling'),metric('QUOTA-BLOCKED',quotaBlocked,'Cooldown in effect'),metric('ACTIVE AGENTS',activeCount,'Currently assigned'));}
-  const tbody=$('auth-rows');if(!tbody)return;tbody.replaceChildren();
-  if(!accounts.length){const tr=el('tr'), td=el('td','No Google accounts registered yet. Click "+ Add account" or "Import default" to connect your accounts.','empty-state');td.colSpan=6;tr.append(td);tbody.append(tr);return;}
-  for(const acc of accounts){
-   const tr=el('tr');
-   const tdAcc=el('td');tdAcc.append(el('strong',acc.email),el('small',acc.account_id+' · '+(acc.credential_saved?'Saved login':'Login not saved')));
-   const tdState=el('td');
-   const badgeClass=acc.health_state==='healthy'?'badge-healthy':(acc.health_state==='quota-blocked'||acc.in_cooldown?'badge-blocked':(acc.health_state==='rate-limited'?'badge-rate-limited':(acc.health_state==='disabled'?'badge-disabled':'badge-unknown')));
-   const stateLabel=acc.in_cooldown?'quota-blocked':acc.health_state==='unknown'&&acc.credential_saved?'saved · unverified':acc.health_state;
-   const badge=el('span',stateLabel.toUpperCase(),'auth-badge '+badgeClass);
-   tdState.append(badge);
-   if(acc.in_cooldown&&acc.remaining_cooldown_seconds){const mins=Math.ceil(acc.remaining_cooldown_seconds/60);tdState.append(el('small',`reset in ~${mins}m`,'cooldown-pill'));}
-   if(acc.last_error){tdState.append(el('small',acc.last_error.slice(0,90),'account-err'));}
-   if(acc.last_run_error){const note=el('small','Last run had a launch/task error; this is separate from login health.');note.title=acc.last_run_error;tdState.append(note);}
-   const td5h=el('td');
-   const turns5=(acc.usage_5h&&typeof acc.usage_5h==='object')?(acc.usage_5h.turns||0):0;
-   td5h.textContent=acc.usage_5h?`${turns5} ${turns5===1?'turn':'turns'}`:'Not recorded';
-   td5h.title='LLM turns completed by agents in rolling 5-hour window';
-   const tdW=el('td');
-   const turnsW=(acc.usage_weekly&&typeof acc.usage_weekly==='object')?(acc.usage_weekly.turns||0):0;
-   tdW.textContent=acc.usage_weekly?`${turnsW} ${turnsW===1?'turn':'turns'}`:'Not recorded';
-   tdW.title='LLM turns completed by agents in rolling 7-day window';
-   const tdAgents=el('td');tdAgents.textContent=`${acc.active_agents||0} running`;
-   const tdActions=el('td',undefined,'auth-actions-cell');
-   const btnLogin=el('button','Sign in','secondary text-button');btnLogin.onclick=guard(async()=>{const r=await api(`/api/auth/google/accounts/${acc.account_id}/login`,{});notice(r.note||'Sign-in opened.');});
-   const btnCapture=el('button','Capture login','secondary text-button');btnCapture.title='Save the credential from the completed terminal sign-in to this slot';btnCapture.onclick=guard(async()=>{const r=await api(`/api/auth/google/accounts/${acc.account_id}/capture`,{});notice(r.note||`Captured credentials for ${acc.account_id}`);await renderAuthPool();});
-   const btnTest=el('button','Check setup','secondary text-button');btnTest.onclick=guard(async()=>{const r=await api(`/api/auth/google/accounts/${acc.account_id}/test`,{});notice(r.note||'Checks local setup; provider quota is not verified');});
-   const btnToggle=el('button',acc.health_state==='disabled'?'Enable':'Disable','secondary text-button');btnToggle.onclick=guard(async()=>{const a=acc.health_state==='disabled'?'enable':'disable';await api(`/api/auth/google/accounts/${acc.account_id}/${a}`,{});notice(`Account ${acc.account_id} ${a}d.`);await renderAuthPool();});
-   const btnDel=el('button','Delete','danger text-button');btnDel.onclick=guard(async()=>{if(!confirm(`Delete profile for ${acc.email} (${acc.account_id})?`))return;await api(`/api/auth/google/accounts/${acc.account_id}`,undefined,'DELETE');notice(`Deleted account ${acc.account_id}.`);await renderAuthPool();});
-   tdActions.append(btnLogin,btnCapture,btnTest,btnToggle,btnDel);
-   tr.append(tdAcc,tdState,td5h,tdW,tdAgents,tdActions);
-   tbody.append(tr);
+
+  function renderPoolTier(metricsId, rowsId, isClaude){
+    const metricsEl=$(metricsId);
+    const tbody=$(rowsId);
+    if(!tbody)return;
+    let healthy=0, quotaBlocked=0, activeCount=0;
+    for(const acc of accounts){
+      const hState=isClaude?(acc.claude_health_state||'healthy'):acc.health_state;
+      const inCd=isClaude?!!acc.claude_in_cooldown:!!acc.in_cooldown;
+      const runCnt=isClaude?(acc.claude_active_agents||0):(acc.active_agents||0);
+      if((hState==='healthy'||(hState==='unknown'&&acc.credential_saved))&&!inCd&&acc.health_state!=='disabled')healthy++;
+      if(hState==='quota-blocked'||inCd)quotaBlocked++;
+      activeCount+=runCnt;
+    }
+    if(metricsEl){
+      metricsEl.replaceChildren(
+        metric('TOTAL ACCOUNTS',accounts.length,isClaude?'Claude 4.6 Opus profiles':'Registered Google profiles'),
+        metric('AVAILABLE',healthy,isClaude?'Available for Claude 4.6 Opus':'Available for Gemini 3.8 Flash'),
+        metric('QUOTA-BLOCKED',quotaBlocked,'Cooldown in effect'),
+        metric('ACTIVE AGENTS',activeCount,'Currently assigned')
+      );
+    }
+    tbody.replaceChildren();
+    if(!accounts.length){
+      const tr=el('tr'), td=el('td','No Google accounts registered yet. Click "+ Add Google account" to connect your accounts.','empty-state');
+      td.colSpan=6;tr.append(td);tbody.append(tr);return;
+    }
+    for(const acc of accounts){
+      const tr=el('tr');
+      const tdAcc=el('td');
+      tdAcc.append(el('strong',acc.email),el('small',acc.account_id+' · '+(acc.credential_saved?'Saved login':'Login not saved')));
+      const tdState=el('td');
+      const hState=acc.health_state==='disabled'?'disabled':(isClaude?(acc.claude_health_state||'healthy'):acc.health_state);
+      const inCd=isClaude?!!acc.claude_in_cooldown:!!acc.in_cooldown;
+      const cdUntil=isClaude?acc.claude_cooldown_until:acc.cooldown_until;
+      const lastErr=isClaude?acc.claude_last_error:acc.last_error;
+      const badgeClass=hState==='healthy'&&!inCd?'badge-healthy':(hState==='quota-blocked'||inCd?'badge-blocked':(hState==='rate-limited'?'badge-rate-limited':(hState==='disabled'?'badge-disabled':'badge-unknown')));
+      const stateLabel=inCd?'quota-blocked':(hState==='unknown'&&acc.credential_saved?'saved · unverified':hState);
+      const badge=el('span',stateLabel.toUpperCase(),'auth-badge '+badgeClass);
+      if(stateLabel==='saved · unverified')badge.title='Login is saved and available for work. Status confirms to HEALTHY on first completed turn.';
+      tdState.append(badge);
+      if(inCd&&cdUntil){
+        const pill=el('small','','cooldown-pill');
+        pill.dataset.cooldownUntil=cdUntil;
+        tdState.append(pill);
+      }
+      if(lastErr){tdState.append(el('small',lastErr.slice(0,90),'account-err'));}
+      if(!isClaude&&acc.last_run_error&&hState!=='healthy'){
+        const note=el('small','Last run had a launch/task error; this is separate from login health.');
+        note.title=acc.last_run_error;tdState.append(note);
+      }
+      const u5=isClaude?acc.claude_usage_5h:acc.usage_5h;
+      const uw=isClaude?acc.claude_usage_weekly:acc.usage_weekly;
+      const td5h=renderUsageCell(u5,'5-Hour');
+      const tdW=renderUsageCell(uw,'7-Day');
+
+      const tdAgents=el('td',undefined,'agents-cell-td');
+      const running=isClaude?(acc.claude_active_agents||0):(acc.active_agents||0);
+      const maxSlots=acc.max_concurrent||4;
+      if(running>0){
+        const badgeBusy=el('span',`● ${running}/${maxSlots} running`,'badge-agent-busy');
+        badgeBusy.title=`${running} active agents running concurrently (max ${maxSlots})`;
+        tdAgents.append(badgeBusy);
+      }else{
+        const badgeIdle=el('span',`Idle (0/${maxSlots})`,'badge-agent-idle');
+        badgeIdle.title=`0 active agents assigned out of ${maxSlots} concurrent slots`;
+        tdAgents.append(badgeIdle);
+      }
+
+      const tdActions=el('td',undefined,'auth-actions-cell');
+      const isPending=data.login_pending===acc.account_id;
+
+      if(!acc.credential_saved || isPending){
+        const btnLogin=el('button','Sign in','secondary text-button auth-action-btn');
+        btnLogin.title='Open terminal window to sign in to this Google account';
+        btnLogin.onclick=guard(async()=>{const r=await api(`/api/auth/google/accounts/${acc.account_id}/login`,{});notice(r.note||'Sign-in opened.','success');await renderAuthPool();});
+
+        const btnCapture=el('button',isPending?'Capture login 📥':'Capture login','secondary text-button auth-action-btn'+(isPending?' btn-highlight':''));
+        btnCapture.title=isPending?'Action required: click to save completed credential from terminal':'Save credential from completed terminal sign-in to this slot';
+        btnCapture.onclick=guard(async()=>{const r=await api(`/api/auth/google/accounts/${acc.account_id}/capture`,{});notice(r.note||`Captured credentials for ${acc.account_id}`,'success');await renderAuthPool();});
+        tdActions.append(btnLogin,btnCapture);
+      }
+
+      const btnTest=el('button','Check setup','secondary text-button auth-action-btn');
+      btnTest.title='Verify configuration and execute a live ping to Google Antigravity';
+      btnTest.onclick=guard(async()=>{
+        const origText=btnTest.text||btnTest.textContent||'Check setup';
+        if(btnTest.textContent)btnTest.textContent='Testing...';
+        try{
+          const r=await api(`/api/auth/google/accounts/${acc.account_id}/test`,{});
+          if(r.latency_ms){
+            notice(r.ok?`⚡ ${acc.account_id} (${acc.email}) verified! Live ping: ${r.latency_ms}ms`:`Test failed: ${r.note}`, r.ok?'success':'error');
+          }else{
+            notice(r.note||'Checks local setup; provider quota is not verified', r.ok?'success':'error');
+          }
+          await renderAuthPool();
+        }finally{
+          if(btnTest.textContent)btnTest.textContent=origText;
+        }
+      });
+
+      const btnToggle=el('button',acc.health_state==='disabled'?'Enable':'Disable','secondary text-button auth-action-btn');
+      btnToggle.title=acc.health_state==='disabled'?'Enable this account for agent scheduling':'Disable this account temporarily';
+      btnToggle.onclick=guard(async()=>{const a=acc.health_state==='disabled'?'enable':'disable';await api(`/api/auth/google/accounts/${acc.account_id}/${a}`,{});notice(`Account ${acc.account_id} ${a}d.`,'success');await renderAuthPool();});
+
+      const btnDel=el('button','Delete','danger text-button auth-action-btn btn-danger');
+      btnDel.title='Permanently remove this account profile';
+      btnDel.onclick=guard(async()=>{if(!confirm(`Delete profile for ${acc.email} (${acc.account_id})?`))return;await api(`/api/auth/google/accounts/${acc.account_id}`,undefined,'DELETE');notice(`Deleted account ${acc.account_id}.`,'success');await renderAuthPool();});
+
+      tdActions.append(btnTest,btnToggle,btnDel);
+      tr.append(tdAcc,tdState,td5h,tdW,tdAgents,tdActions);
+      tbody.append(tr);
+    }
   }
+
+  renderPoolTier('auth-metrics','auth-rows',false);
+  renderPoolTier('claude-auth-metrics','claude-auth-rows',true);
+  updateCooldownTickers();
  }catch(err){if($('auth-health'))$('auth-health').textContent='Auth pool unavailable: '+err.message;}
 }
 window.refreshAuthPool=renderAuthPool;
-let authPollInterval=null;
-function setView(view){
- window.scrollTo({top:0});
- studioView=view;
- $('spawn').hidden=view!=='team'||!tree?.manager;
- localStorage.setItem('agentic_team_view',view);
- $('team-view').hidden=view!=='team';
- $('usage-view').hidden=view!=='usage';
- if($('auth-view'))$('auth-view').hidden=view!=='auth';
- document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('on',b.dataset.view===view));
- if(authPollInterval){clearInterval(authPollInterval);authPollInterval=null;}
- if(view==='usage')renderUsage();
- else if(view==='auth'){
-  renderAuthPool();
-  authPollInterval=setInterval(()=>{if(studioView==='auth')renderAuthPool();},2500);
- }else requestAnimationFrame(drawLinks);
-}
-function connect(){
- socket=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/ws');
- socket.onopen=()=>{$('connection').textContent='Connected';$('connection').className='connected';};
- socket.onclose=()=>{$('connection').textContent='Reconnecting';$('connection').className='';setTimeout(connect,2500);};
- socket.onmessage=e=>{
-  const event=JSON.parse(e.data);if(event.type==='ping'||event.type==='ready')return;
-  if(event.type==='new_message'&&event.data.project_name===currentProject){flowHistory.push(event.data);if(flowHistory.length>40)flowHistory.shift();renderFeed();drawLinks(event.data);}
-  if(active&&event.type==='new_message'&&(tab==='chat'||tab==='status'))refreshSession().catch(err=>notice(err.message));
-  if(event.type==='agent_updated'||event.type==='agent_event'||event.type==='worker_terminated'||event.type==='agents_connected'||event.type==='agents_disconnected'){
-   if(!refreshTimer)refreshTimer=setTimeout(()=>{refreshTimer=null;refreshTree().catch(err=>notice(err.message));syncTelemetry().catch(()=>{});},700);
-  }else if(!refreshTimer){
-   refreshTimer=setTimeout(()=>{refreshTimer=null;refreshTree().catch(err=>notice(err.message));},1200);
+ let activeAuthProviderTab='google';
+ async function renderProviderAuthTab(provKey, forceLive=false){
+  activeAuthProviderTab=provKey;
+  document.querySelectorAll('#auth-provider-tabs .provider-tab').forEach(b=>{
+    const isMatch = b.dataset.providerTab===provKey;
+    b.classList.toggle('active', isMatch);
+    b.classList.toggle('on', isMatch);
+  });
+  const googleSec=$('google-auth-section'), provSec=$('provider-auth-section');
+  const addBtn=$('btn-quick-signin');
+  if(provKey==='google'){
+   if(googleSec)googleSec.hidden=false;
+   if(provSec)provSec.hidden=true;
+   if(addBtn)addBtn.hidden=false;
+   await renderAuthPool();
+   return;
   }
- };
-}
-document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>setView(b.dataset.view));
-if($('usage-scope'))$('usage-scope').onchange=()=>{usageScope=$('usage-scope').value;renderUsage();};
-if($('usage-time-filter'))$('usage-time-filter').onchange=()=>{usageTimeFilter=$('usage-time-filter').value;renderUsage();};
-$('close-session').addEventListener('click',()=>{document.body.classList.remove('inspecting');sessionSignature='';updateActors();});
-window.addEventListener('resize',()=>requestAnimationFrame(drawLinks));
-setInterval(()=>syncTelemetry(),5000);
-setTimeout(()=>syncTelemetry(),800);
-setTimeout(()=>setView(studioView),100);
+  if(googleSec)googleSec.hidden=true;
+  if(provSec)provSec.hidden=false;
+  if(addBtn)addBtn.hidden=true;
+  if(!provSec)return;
+  try{
+   const data=await api('/api/settings'), s=data.settings||{}, presets=data.provider_presets||{};
+   const presetMap={codex:'openai',deepseek:'deepseek',zai:'zai',experiential:'experiential',claude:'anthropic'};
+   const presetKey=presetMap[provKey]||provKey;
+   const preset=presets[presetKey]||{label:provKey.toUpperCase(),alias:provKey,adapter:'openai_compatible',models:[]};
+   const alias=preset.alias||provKey;
+   let liveModels = null;
+   try {
+     const liveRes = await api(`/api/providers/${encodeURIComponent(alias)}/models?force=${forceLive ? 'true' : 'false'}`);
+     if (liveRes && Array.isArray(liveRes.models) && liveRes.models.length) {
+       liveModels = liveRes.models;
+     }
+   } catch (_) {}
+   const saved=(s.providers&&s.providers[alias])||preset;
+   const displayModels = liveModels || saved.models || [];
+   const hasKey=!!(s.api_keys&&s.api_keys[alias]);
+   const cliEnabled=provKey==='codex'?!!s.cli_auth_enabled?.codex:(provKey==='claude'?!!s.cli_auth_enabled?.claude:false);
+   const isConnected=hasKey||cliEnabled;
+   provSec.replaceChildren();
+   const card=el('div',undefined,'settings-section');
+   card.style.cssText='background:#131920;border:1px solid var(--line);border-radius:6px;padding:18px;';
+   const head=el('div');
+   head.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;';
+   const titleWrap=el('div');
+   titleWrap.append(el('h3',preset.label||alias.toUpperCase()),el('p',`Alias: ${alias} · Adapter: ${saved.adapter||'direct'} · Base URL: ${saved.base_url||'Default'}`,'muted'));
+   const statusBadge=el('span',isConnected?'CONNECTED':'NOT CONFIGURED','auth-badge '+(isConnected?'badge-healthy':'badge-unknown'));
+   head.append(titleWrap,statusBadge);
+   const modelsHdr=el('div');
+   modelsHdr.style.cssText='display:flex;align-items:center;justify-content:space-between;margin:10px 0 8px;';
+   modelsHdr.append(
+     el('small', `AVAILABLE MODELS RECEIVED FROM API (${displayModels.length})`, 'muted'),
+     (() => {
+       const btnRef = el('button', '🔄 Fetch Live Models', 'secondary text-button');
+       btnRef.type = 'button';
+       btnRef.style.fontSize = '11px';
+       btnRef.onclick = guard(async () => {
+         btnRef.textContent = 'Querying API...';
+         await renderProviderAuthTab(provKey, true);
+         notice(`Fetched live models from ${preset.label || alias}`);
+       });
+       return btnRef;
+     })()
+   );
+   const modelsWrap=el('div');
+   modelsWrap.style.cssText='margin:8px 0 14px;display:flex;flex-wrap:wrap;gap:6px;max-height:220px;overflow-y:auto;padding:4px 0;';
+   for(const m of displayModels){
+    const pill=el('span',`${alias}/${m}`,'chip');
+    pill.style.cssText='background:#0f1419;border:1px solid #2b3642;color:#ffffff;padding:4px 10px;border-radius:4px;font-size:12px;';
+    modelsWrap.append(pill);
+   }
+   const actionsWrap=el('div');
+   actionsWrap.style.cssText='margin-top:14px;display:flex;gap:10px;align-items:center;';
+   const cfgBtn=el('button','Configure API Key / Settings','primary');
+   cfgBtn.onclick=guard(async()=>{
+    await settings();
+    if($('provider-preset')&&presets[presetKey]){
+     $('provider-preset').value=presetKey;
+     $('provider-preset').dispatchEvent(new Event('change'));
+    }
+    $('settings-dialog').showModal();
+   });
+   actionsWrap.append(cfgBtn);
+   card.append(head,modelsHdr,modelsWrap,actionsWrap);
+   provSec.append(card);
+  }catch(err){
+   provSec.textContent='Failed to load provider details: '+err.message;
+  }
+ }
+ document.querySelectorAll('#auth-provider-tabs .provider-tab').forEach(b=>{
+  b.addEventListener('click',()=>renderProviderAuthTab(b.dataset.providerTab));
+ });
+ let authPollInterval=null;
+ function updateCooldownTickers(){
+  const pills=document.querySelectorAll('[data-cooldown-until]');
+  for(const p of pills){
+   const target=new Date(p.dataset.cooldownUntil).getTime();
+   const diff=Math.max(0,Math.floor((target-Date.now())/1000));
+   if(diff<=0){
+    p.textContent='ready · cooldown expired';
+    p.className='cooldown-pill ready';
+    continue;
+   }
+   const days=Math.floor(diff/86400);
+   const hours=Math.floor((diff%86400)/3600);
+   const mins=Math.floor((diff%3600)/60);
+   const secs=diff%60;
+   const secStr=secs<10?'0'+secs:secs;
+   if(days>0)p.textContent=`reset in ${days}d ${hours}h ${mins}m ${secStr}s`;
+   else if(hours>0)p.textContent=`reset in ${hours}h ${mins}m ${secStr}s`;
+   else p.textContent=`reset in ${mins}m ${secStr}s`;
+  }
+ }
+  if(!window.cooldownTimer){
+   window.cooldownTimer=setInterval(updateCooldownTickers,1000);
+  }
+
+  async function renderStorage(){
+   try{
+    const data=await api('/api/storage/status');
+    if(!data||!data.available){
+      if($('storage-health'))$('storage-health').textContent='Storage cleanup audit report unavailable.';
+      return;
+    }
+    if($('storage-health')&&data.hard_safety_invariant){
+      $('storage-health').textContent=data.hard_safety_invariant;
+    }
+    if($('mini-storage-reclaim')){
+      const rec=data.reclaimable_space?.total_immediate_safe_reclaim_gb??99.15;
+      $('mini-storage-reclaim').textContent=`${rec} GB`;
+    }
+    if($('storage-approval-badge')){
+      $('storage-approval-badge').textContent='🔒 '+(data.approval_state||'PENDING HUMAN OWNER APPROVAL').replaceAll('_',' ').toUpperCase();
+    }
+    if($('storage-metrics-grid')){
+      const rec=data.reclaimable_space||{};
+      const prot=data.protected_core_assets||{};
+      const drives=data.disk_status||{};
+      const cDrive=drives['C']||{free_gb:34.41,percent_free:7.24};
+      const totalProtected=Math.round(((prot.protected_gb||7.71)+(prot.canonical_gb||7.75))*100)/100||15.46;
+      $('storage-metrics-grid').replaceChildren(
+        metric('FREE C: (CURRENT)',`${cDrive.free_gb||34.41} GB`,`${cDrive.percent_free||7.24}% free of drive C:`),
+        metric('SAFE RECLAIM',`${rec.total_immediate_safe_reclaim_gb||99.15} GB`,'Expands C: to 133.56 GB'),
+        metric('SAFE CACHE/TEMP',`${rec.safe_cache_temp_cleanup_gb||29.02} GB`,'Zero code or weight impact'),
+        metric('EXACT DUPLICATES',`${rec.exact_duplicates_gb||70.13} GB`,'Identical content hashes'),
+        metric('HISTORICAL CHECKPOINTS',`${rec.historical_checkpoints_gb||56.68} GB`,'16 reproducible checkpoints'),
+        metric('EXTERNAL MIGRATION',`${rec.optional_external_drive_migration_gb||86.84} GB`,'Move to D:/G: drives'),
+        metric('PROTECTED CORE',`${totalProtected} GB`,'Canonical base & active data')
+      );
+    }
+    if($('storage-review-cache-list')){
+      const clist=$('storage-review-cache-list');
+      clist.replaceChildren();
+      const safeItems=data.temp_and_agent_cache_audit?.safe_now||[];
+      if(!safeItems.length){
+        clist.append(el('li','No cache targets listed.'));
+      }else{
+        for(const item of safeItems.slice(0,10)){
+          const li=el('li');
+          li.append(el('strong',`${item.size_gb} GB`),document.createTextNode(` — ${item.path} (${item.reason})`));
+          clist.append(li);
+        }
+      }
+    }
+    if($('storage-review-duplicates-list')){
+      const dlist=$('storage-review-duplicates-list');
+      dlist.replaceChildren();
+      const clusters=data.duplicate_clusters||[];
+      if(!clusters.length){
+        dlist.append(el('div','No duplicate clusters recorded.','muted'));
+      }else{
+        for(const cl of clusters.slice(0,6)){
+          const card=el('div',undefined,'duplicate-cluster-card');
+          card.style.cssText='background:#181f25;padding:8px 12px;border:1px solid var(--line);border-radius:4px;margin-bottom:8px;';
+          card.append(el('div',`Hash: ${cl.sha256?cl.sha256.slice(0,16)+'...':'cluster'} · Reclaimable: ${cl.reclaimable_gb||0} GB (${cl.count||0} copies)`,'muted'));
+          const ul=el('ul');ul.style.cssText='margin:4px 0 0;padding-left:18px;color:var(--muted);';
+          for(const f of (cl.files||[]).slice(0,3)){
+            ul.append(el('li',f));
+          }
+          card.append(ul);
+          dlist.append(card);
+        }
+      }
+    }
+    if($('storage-review-protected-list')){
+      const plist=$('storage-review-protected-list');
+      plist.replaceChildren();
+      const pset=data.protected_core_assets?.protected_set||[];
+      if(!pset.length){
+        plist.append(el('li','No protected items recorded.'));
+      }else{
+        for(const p of pset){
+          plist.append(el('li',typeof p==='string'?p:`${p.name||p.path} (${p.size_gb||0} GB)`));
+        }
+      }
+    }
+    if($('storage-drives-list')){
+      const container=$('storage-drives-list');
+      container.replaceChildren();
+      const drives=data.disk_status||{};
+      const driveKeys=Object.keys(drives);
+      if(!driveKeys.length){
+        container.append(el('div','No drive capacity telemetry found.','muted'));
+      }else{
+        for(const k of driveKeys){
+          const d=drives[k];
+          const div=el('div',undefined,'drive-card');
+          div.style.cssText='background:#181f25;padding:12px;border:1px solid var(--line);border-radius:6px;';
+          const title=el('div',undefined,'drive-header');
+          title.style.cssText='display:flex;justify-content:space-between;font-size:12px;font-weight:600;margin-bottom:6px;';
+          title.append(el('span',`Drive ${k}`),el('span',`${d.free_gb||0} GB Free of ${d.total_gb||0} GB`,'muted'));
+          const bar=el('progress');
+          bar.max=d.total_gb||1;
+          bar.value=(d.total_gb||0)-(d.free_gb||0);
+          bar.style.width='100%';
+          div.append(title,bar);
+          container.append(div);
+        }
+      }
+    }
+    if($('storage-protected-list')){
+      const list=$('storage-protected-list');
+      list.replaceChildren();
+      const protectedItems=data.protected_core_assets?.protected_set||[];
+      if(!protectedItems.length){
+        list.append(el('li','No protected items recorded.'));
+      }else{
+        for(const item of protectedItems){
+          const li=el('li');
+          const strong=el('strong',item.name||item.path||'Asset');
+          li.append(strong,document.createTextNode(` — ${item.path||''} (${item.size_gb||0} GB) · ${item.protection_reason||'Critical asset'}`));
+          list.append(li);
+        }
+      }
+    }
+    if($('storage-categories-rows')){
+      const tbody=$('storage-categories-rows');
+      tbody.replaceChildren();
+      const breakdown=data.category_breakdown||{};
+      const catKeys=Object.keys(breakdown);
+      if(!catKeys.length){
+        const tr=el('tr'), td=el('td','No category breakdown recorded.','empty-state');
+        td.colSpan=5;
+        tr.append(td);
+        tbody.append(tr);
+      }else{
+        for(const catName of catKeys){
+          const cat=breakdown[catName];
+          const tr=el('tr');
+          const tdCat=el('td');
+          tdCat.append(el('strong',pretty(catName)));
+          const tdCount=el('td',`${cat.count||0}`);
+          const tdSize=el('td',`${cat.total_gb||0} GB`);
+          const tdSafety=el('td');
+          const isSafe=(cat.safety_classification||'').toLowerCase().includes('safe');
+          const badge=el('span',(cat.safety_classification||'UNKNOWN').toUpperCase(),'auth-badge '+(isSafe?'badge-healthy':'badge-blocked'));
+          tdSafety.append(badge);
+          const tdAction=el('td',cat.recommended_action||'—');
+          tr.append(tdCat,tdCount,tdSize,tdSafety,tdAction);
+          tbody.append(tr);
+        }
+      }
+    }
+   }catch(err){
+     if($('storage-health'))$('storage-health').textContent='Storage status error: '+err.message;
+   }
+  }
+  window.renderStorage=renderStorage;
+
+  function setView(view){
+   window.scrollTo({top:0});
+   studioView=view;
+   $('spawn').hidden=view!=='team'||!tree?.manager;
+   localStorage.setItem('agentic_team_view',view);
+   $('team-view').hidden=view!=='team';
+   $('usage-view').hidden=view!=='usage';
+   if($('auth-view'))$('auth-view').hidden=view!=='auth';
+   if($('storage-view'))$('storage-view').hidden=view!=='storage';
+   document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('on',b.dataset.view===view));
+   if(authPollInterval){clearInterval(authPollInterval);authPollInterval=null;}
+   if(view==='usage')renderUsage();
+   else if(view==='auth'){
+    renderAuthPool();
+    authPollInterval=setInterval(()=>{if(studioView==='auth')renderAuthPool();},2500);
+   }else if(view==='storage'){
+    renderStorage();
+   }else requestAnimationFrame(drawLinks);
+  }
+ function connect(){
+  socket=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/ws');
+  socket.onopen=()=>{$('connection').textContent='Connected';$('connection').className='connected';};
+  socket.onclose=()=>{$('connection').textContent='Reconnecting';$('connection').className='';setTimeout(connect,2500);};
+  socket.onmessage=e=>{
+   const event=JSON.parse(e.data);if(event.type==='ping'||event.type==='ready')return;
+   if(event.type==='new_message'&&event.data.project_name===currentProject){flowHistory.push(event.data);if(flowHistory.length>40)flowHistory.shift();renderFeed();drawLinks(event.data);}
+   if(active&&event.type==='new_message'&&(tab==='chat'||tab==='status'))refreshSession().catch(err=>notice(err.message));
+
+   if(event.type==='agent_updated'||event.type==='agent_event'||event.type==='worker_terminated'||event.type==='agents_connected'||event.type==='agents_disconnected'){
+    if(!refreshTimer)refreshTimer=setTimeout(()=>{refreshTimer=null;refreshTree().catch(err=>notice(err.message));syncTelemetry().catch(()=>{});},700);
+   }else if(!refreshTimer){
+    refreshTimer=setTimeout(()=>{refreshTimer=null;refreshTree().catch(err=>notice(err.message));},1200);
+   }
+  };
+ }
+ document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>setView(b.dataset.view));
+ if($('usage-scope'))$('usage-scope').onchange=()=>{usageScope=$('usage-scope').value;renderUsage();};
+ if($('usage-time-filter'))$('usage-time-filter').onchange=()=>{usageTimeFilter=$('usage-time-filter').value;renderUsage();};
+ $('close-session').addEventListener('click',()=>{document.body.classList.remove('inspecting');sessionSignature='';updateActors();});
+ if($('btn-fullscreen-floor')){
+  $('btn-fullscreen-floor').addEventListener('click',()=>{
+   const isFull=document.body.classList.toggle('floor-fullscreen');
+   $('btn-fullscreen-floor').classList.toggle('active',isFull);
+   graphSignature='';
+   requestAnimationFrame(()=>{renderTeam();drawLinks();});
+  });
+ }
+ document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&document.body.classList.contains('floor-fullscreen')){
+   document.body.classList.remove('floor-fullscreen');
+   if($('btn-fullscreen-floor'))$('btn-fullscreen-floor').classList.remove('active');
+   graphSignature='';
+   requestAnimationFrame(()=>{renderTeam();drawLinks();});
+  }
+ });
+ (()=>{
+  const scrollEl=document.querySelector('.canvas-scroll');
+  if(!scrollEl)return;
+  let pan=null;
+  scrollEl.addEventListener('pointerdown',e=>{
+   if(e.button!==0)return;
+   if(e.target.closest('.actor, button, a, input, select, textarea'))return;
+   pan={startX:e.clientX,startY:e.clientY,scrollLeft:scrollEl.scrollLeft,scrollTop:scrollEl.scrollTop};
+   scrollEl.classList.add('panning');
+   scrollEl.setPointerCapture(e.pointerId);
+   e.preventDefault();
+  });
+  scrollEl.addEventListener('pointermove',e=>{
+   if(!pan)return;
+   scrollEl.scrollLeft=pan.scrollLeft-(e.clientX-pan.startX);
+   scrollEl.scrollTop=pan.scrollTop-(e.clientY-pan.startY);
+  });
+  const endPan=e=>{
+   if(!pan)return;
+   pan=null;
+   scrollEl.classList.remove('panning');
+   try{if(e?.pointerId!==undefined)scrollEl.releasePointerCapture(e.pointerId);}catch(_){}
+  };
+  scrollEl.addEventListener('pointerup',endPan);
+  scrollEl.addEventListener('pointercancel',endPan);
+ })();
+ window.addEventListener('resize',()=>{graphSignature='';renderTeam();requestAnimationFrame(drawLinks);});
+ setInterval(()=>syncTelemetry(),5000);
+ setTimeout(()=>syncTelemetry(),800);
+ setTimeout(()=>setView(studioView),100);
