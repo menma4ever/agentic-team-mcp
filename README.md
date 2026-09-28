@@ -1,148 +1,166 @@
-# Agentic Team MCP — Persistent Autonomous Multi-Agent Operating System
+# Agentic Team MCP — Persistent Multi-Agent Orchestration for Model Context Protocol
 
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
-[![Architecture: Local-First](https://img.shields.io/badge/Architecture-Local--First-orange.svg)](#)
-[![Version: 3.0.0-PROD](https://img.shields.io/badge/Version-3.0.0--PROD-purple.svg)](#)
+[![Local-First](https://img.shields.io/badge/Architecture-Local--First-orange.svg)](#)
+[![Autonomous Multi-Agent](https://img.shields.io/badge/Agents-Autonomous_Multi--Agent-purple.svg)](#)
 [![Telegram Native](https://img.shields.io/badge/Telegram-@ufljarvisbot-229ED9.svg)](https://t.me/ufljarvisbot)
 
 ![Agentic Team Web Studio Floor](assets/web_studio_team_floor.png)
-*Live full-screen Web Studio canvas on Project `Bonsai_Sauce_Qwen3.5-2B` showing the active 5-tier hierarchy: Root Watchdog sentinel, CEO Astra, Manager Bonsai, and the 5 specialized research workers (Workers A–E) with live SVG collaboration links and token telemetry. (See animated GIF: [`assets/web_studio_preview.gif`](assets/web_studio_preview.gif))*
+*Live interactive Web Studio floor visualization showing Root Watchdog supervision, hierarchical reporting trees, and dynamic agent collaboration links. (See animated preview: [`assets/web_studio_preview.gif`](assets/web_studio_preview.gif))*
 
-> **Agentic Team MCP** is an enterprise-grade, local-first multi-agent operating system and [Model Context Protocol (MCP)](https://modelcontextprotocol.io) platform. It establishes a resilient, persistent hierarchical workforce (**Root Watchdog → CEO Strategy → Operational Managers → Specialist Workers → Human Owner**) that unifies native developer CLI coding environments (Claude Code, Gemini Antigravity, OpenAI Codex) with direct high-throughput API engines (DeepSeek, Z.ai/GLM, Google Gemini, OpenAI, Experiential Labs, Groq) and cloud GPU training infrastructure.
+> **Agentic Team MCP** is an enterprise-grade, local-first multi-agent orchestration platform designed around the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). It establishes a persistent, hierarchical agent workforce (**Root Watchdog Supervisor → CEO Strategy → Manager Execution → Specialist Workers**) that bridges native CLI coding environments (Claude Code, Gemini Antigravity, Codex) with unified direct API providers (DeepSeek, Z.ai/GLM, Google Gemini, OpenAI, and OpenRouter).
 
 ---
 
-## 🏛️ Executive Summary & Architectural Overview
+## Author's Note
 
-The **Agentic Team MCP** ecosystem evolved from a single-process command runner into a distributed, autonomous multi-agent operating system bridging local developer workflows, cloud GPU distillation pipelines, browser dashboards, and encrypted mobile Telegram communication.
+> **Abdulaziz Komilov (@menma4ever)**, student researcher in local model fine-tuning and quantization, building persistent, cost-effective multi-agent teams across native CLIs (Claude Code, Gemini Antigravity, Codex) and Model Context Protocol.
+> 
+> Modern agent frameworks often suffer from three fatal flaws: fragile ephemeral execution contexts, proprietary cloud lock-in, and ballooning API token costs. **Agentic Team MCP** was engineered to solve these problems by coupling **persistent SQLite event sourcing** with **native CLI adapters** (leveraging existing subscription authorizations like Claude Code, Gemini Antigravity, and Codex CLI) alongside high-efficiency open-weights models (DeepSeek-V3/R1 and GLM-5). The result is an autonomous, self-healing team architecture capable of executing complex engineering milestones locally, deterministically, and cost-effectively.
 
+---
+
+## Visual Architecture
+
+```mermaid
+flowchart TD
+    subgraph ClientLayer["User & Client Layer"]
+        User["Developer / User"]
+        ClaudeDesktop["Claude Desktop"]
+        CursorIDE["Cursor IDE"]
+        WebBrowser["Web Browser (Studio GUI)"]
+        TelegramUser["Telegram Mobile Client"]
+    end
+
+    subgraph GatewayLayer["MCP & Gateway Layer"]
+        MCPServer["FastMCP Stdio Server<br/>(mcp_server/server.py)"]
+        WebStudio["Web Studio & REST Gateway<br/>(FastAPI / Uvicorn)"]
+        TelegramBridge["Telegram Supervisor Bridge<br/>(core/telegram_bridge.py)"]
+    end
+
+    subgraph CoreLayer["Orchestrator Core"]
+        Engine["Orchestrator Engine<br/>(engine/orchestrator.py)"]
+        SQLiteStore["SQLite Event Sourcing<br/>(team.sqlite3)"]
+        Queues["Task Queues & Loop Monitor"]
+        WatchdogBrain["Watchdog Supervisor Engine<br/>(core/watchdog_brain.py)"]
+    end
+
+    subgraph TeamHierarchy["Hierarchical Agent Team"]
+        Watchdog["Root Watchdog Agent<br/>(Global Supervisor & Bridge)"]
+        CEO["CEO Agent<br/>(Strategic Planning & Architecture)"]
+        Manager["Manager Agent<br/>(Milestone Breakdown & Task Dispatch)"]
+        Worker1["Specialist Worker 1<br/>(Implementation / Code)"]
+        Worker2["Specialist Worker 2<br/>(Documentation / QA)"]
+    end
+
+    subgraph ExecutionLayer["Execution Harnesses & Providers"]
+        subgraph CLIAdapters["Native CLI Harnesses"]
+            ClaudeCode["Claude Code CLI"]
+            AntigravityCLI["Gemini Antigravity CLI"]
+            CodexCLI["Codex CLI"]
+            HermesCLI["Hermes / OpenClaw"]
+        end
+        subgraph DirectAPI["Direct API Providers"]
+            DeepSeekAPI["DeepSeek (V3 / R1)"]
+            ZaiAPI["Z.ai / GLM-5"]
+            GeminiAPI["Google Gemini"]
+            OpenAIAPI["OpenAI"]
+            OpenRouterAPI["OpenRouter / SiliconFlow / Groq"]
+        end
+    end
+
+    User --> ClaudeDesktop
+    User --> CursorIDE
+    User --> WebBrowser
+    TelegramUser <--> TelegramBridge
+
+    ClaudeDesktop -->|"stdio MCP"| MCPServer
+    CursorIDE -->|"stdio MCP"| MCPServer
+    WebBrowser -->|"HTTP / WebSocket"| WebStudio
+    TelegramBridge <--> WatchdogBrain
+
+    MCPServer -->|"Engine Actions"| Engine
+    WebStudio -->|"REST / Event Streams"| Engine
+    WatchdogBrain <--> Engine
+
+    Engine <--> SQLiteStore
+    Engine <--> Queues
+
+    Watchdog -.->|"Supervises"| CEO
+    Watchdog -.->|"Supervises"| Manager
+    Engine --> CEO
+    CEO -->|"Dispatches Roadmap"| Manager
+    Manager -->|"Assigns Task"| Worker1
+    Manager -->|"Assigns Task"| Worker2
+
+    Worker1 --> CLIAdapters
+    Worker2 --> DirectAPI
 ```
-                             +-----------------------------------+
-                             |       HUMAN OWNER (@zwyci)        |
-                             +-----------------+-----------------+
-                                               |
-                     +-------------------------+-------------------------+
-                     | Telegram (@ufljarvisbot)                          | Antigravity Web Studio
-                     | [Mobile Telegram Bridge]                          | [http://127.0.0.1:8765]
-                     +-------------------------+-------------------------+
-                                               |
-                               +---------------+---------------+
-                               |         ROOT WATCHDOG         |
-                               | (Master Sentinel & Director)  |
-                               +---------------+---------------+
-                                               |
-                               +---------------+---------------+
-                               |           CEO ASTRA           |
-                               | (Strategic Critic & Spawner)  |
-                               +-------+---------------+-------+
-                                       |               |
-             +-------------------------+               +-------------------------+
-             |                                                                   |
-+------------+------------+                                         +------------+------------+
-|     CAMPAIGN_MANAGER    |                                         |     MANAGER_BONSAI      |
-| (Project: Job searching)|                                         | (Project: Qwen3.5-2B)   |
-+------------+------------+                                         +------------+------------+
-             |                                                                   |
-     [Worker Fleet]                                                      [Worker Fleet]
- (Global, EMEA, Local)                                               (Prism, DeltaNet, RunPod)
-```
-
-### Core Architectural Pillars
-1. **Strict 5-Tier Command Chain**: `Workers → Manager → CEO → Watchdog → Human Owner` prevents runaway token loops, protects executive quotas, and enforces structured handoffs.
-2. **Multi-Account Google Auth Pool (`core/auth_pool.py`)**: Isolated directory profiles, Windows Credential Vault sandboxing, sticky KV-cache affinity, and automatic 429 quota failover for Gemini 3.8 Flash High and Claude 4.6 Opus.
-3. **Multi-Harness Execution Subsystem (`harness/`)**: Modular adapters for subprocess CLIs (`antigravity`, `codex`, `claude_code`) and high-throughput streaming (`direct_api` for DeepSeek-V3/R1, GLM-5, Experiential Labs `xpl`, Groq).
-4. **Autonomous Telegram Bridge (`core/telegram_*`)**: Mobile interface (`@ufljarvisbot`) featuring cryptographic sender whitelisting, typing simulation, voice note STT transcription, vision ingestion, and automated `[DISPATCH]` & `[SEND_FILE]` triggers.
-5. **Interactive Web Studio (`web/`)**: Real-time WebSocket state streaming, full-screen canvas layout, live SVG message vectors, and granular token/pricing telemetry.
-6. **Cloud Compute & Training Orchestration**: Headless RunPod GPU deployment, unquantized teacher-student distillation pipelines, fail-closed zero-burn teardowns, and physical Q2_0 quantization validation.
-7. **Production Resiliency**: Starlette path-traversal middleware patches, Windows socket lifecycle management, and transactional SQLite event sourcing.
 
 ---
 
-## 🔬 Subsystem Deep Dives
+## Why Agentic Team MCP?
 
-### 1. Google Multi-Account Auth Pool (`core/auth_pool.py`)
-Agents running on the Google Account Pool (`antigravity` harness) rely on `gemini-3.8-flash-high` and `claude-opus-4-6-thinking`.
-* **Per-Account Directory Isolation**: Each Google account receives a dedicated directory (`auth/google/account_XX/`) with its own `.gemini/` configuration, sub-settings, and credential vaults. `USERPROFILE`, `HOME`, and `ANTIGRAVITY_APP_DATA_DIR` are scoped exclusively to that folder.
-* **Keyring Swap & Vault Capture Engine**: When initiating authentication for a new slot, the system backs up existing vault credentials into `credential.dat`, wipes the active Windows Keyring entry to prevent silent auto-login, and launches an isolated PowerShell terminal for OAuth completion.
-* **Sticky Affinity & Rate-Limit Concurrency Gates**: Each agent is granted slot affinity (`forced_auth_slot_id`) so ongoing conversations continue hitting the same account to maximize KV-cache reuse. Concurrency limiters (`max_concurrent = 4` per account) prevent socket saturation.
-* **Automated Quota Failover**: Detection of `429 Rate Limit` or quota saturation immediately transitions the slot to `quota-blocked` with exponential backoff, routing pending tasks to the next healthiest slot without destroying conversation context.
-
-### 2. Multi-Harness Subsystem (`harness/` & `core/providers.py`)
-Decouples high-level agent logic from physical model execution:
-* **`antigravity` (Antigravity CLI Runner)**: Primary driver for Google Account Pool (`gemini-3.8-flash-high`, `claude-opus-4-6-thinking`).
-* **`codex` (OpenAI Codex CLI Runner)**: Integrates OpenAI's developer CLI for frontier models (`gpt-6-sol`, `gpt-6-luna`, `gpt-4o`).
-* **`claude_code` (Claude Code CLI Runner)**: Executes Anthropic's native terminal agent with full tool harness capabilities.
-* **`direct_api` (High-Throughput HTTP Client)**: Direct SSE streaming client for third-party API providers:
-  * **Experiential Labs (`xpl`)**: Special integration supporting `gpt-6-sol` and `claude-opus-5.5` using dedicated API keys.
-  * **DeepSeek**: DeepSeek Chat / Reasoner endpoints.
-  * **Zhipu AI (GLM)**: GLM-4 / GLM-5.3 integration.
-  * **Groq & Together**: Ultra-low-latency open-weights inference.
-* **Context Preservation & Session Handoffs**: When an agent is reconfigured from one harness or model to another, the engine serializes the conversation transcript into `manager/.handoffs/<hash>.json`, preventing cognitive amnesia during architectural transitions.
-
-### 3. Root Watchdog & Autonomous Telegram Bridge (`core/telegram_*`)
-Root Watchdog functions as the autonomous Chief of Staff connecting the Human Owner to the platform via Telegram (`@ufljarvisbot`).
-* **Cryptographic Whitelisting**: Restricts all control strictly to **Abdulaziz Komilov (@zwyci / Chat ID: `5644286697`)**. Unauthorized Telegram IDs are silently dropped.
-* **Typing Indicator Simulation**: During multi-step tool calls or deep reasoning, an asynchronous loop triggers Telegram's `send_chat_action(action='typing')` every 4.5 seconds.
-* **Autonomous Tool Directives**:
-  * `[DISPATCH: <AGENT>] <instruction>`: Watchdog autonomously wakes sleeping managers or enqueues tasks.
-  * `[SEND_FILE: <path>]`: Automatically uploads generated artifacts, reports, or logs as physical files directly to Telegram.
-* **Multimodal Ingestion Pipeline (`core/multimodal.py`)**: Audio voice messages are downloaded and transcribed via speech-to-text; images/documents are ingested and passed as native vision tokens.
-
-### 4. Interactive Web Studio (`web/`)
-The Web Studio (`http://127.0.0.1:8765`) serves as the operational cockpit:
-* **Topological Canvas & Full-Screen Mode**: Interactive nodes linked by SVG vectors representing hierarchy. Dedicated full-screen toggle (`#btn-fullscreen-floor` / `floor-fullscreen`) provides distraction-free monitoring.
-* **Real-Time Communication Flow**: Over a `/ws` WebSocket endpoint, active tool calls and messages animate traveling pulses along SVG vectors connecting sender and recipient nodes.
-* **Telemetry & Pricing Metrics (`telemetry.js`)**: Tracks execution stats across all projects: `input_tokens`, `output_tokens`, `cache_read_tokens`, and turnaround latencies with real-time cost modeling.
-* **Starlette Wildcard Route Crash Fix**: Wrapped route boundary middleware in `web/app.py` catching `OSError: [WinError 123]` on invalid path characters, returning clean HTTP 404 instead of process crashes.
-
-### 5. Cloud GPU Distillation & Physical Quantization (SDE43)
-In project `Bonsai_Sauce_Qwen3.5-2B`, the platform conducted SDE43 Phase 1 Strategy B: quantizing Qwen3.5-2B into a strict ternary representation with physical Q2_0 serialization:
-* **Uncapped RunPod Headless Deployment**: Pod `51g9hl8u5ycurw` (NVIDIA L40 48GB VRAM @ $0.7180/hr) ran continuous distillation across **5,000 steps** (87.2 minutes), streaming BF16 activations into a Straight-Through Estimator (STE) student.
-* **Zero-Billing Teardown**: Upon upload failure/completion, verified via RunPod GraphQL API that `myself.pods` returned empty (`[]`), guaranteeing zero compute or storage leakage. Realized spend was **$1.2669 USD** (78.1% under budget).
-* **Offline CPU Verification ($0.00 Cloud Spend)**:
-  * Unquantized Teacher Baseline: `3.4092 NLL` (PPL 30.24)
-  * Step 0 Analytical Rounding: `14.1617 NLL` (PPL 1,413,673)
-  * Step 4,500 Physical Artifact: **`5.3997 NLL`** (PPL **`221.34`**)
-  * **Result**: Recovered **`81.49%`** of the quantization collapse, closing the teacher gap to `+1.9905 nats`.
+| Feature | Agentic Team MCP | Traditional Multi-Agent Frameworks | Standard MCP Servers |
+| :--- | :--- | :--- | :--- |
+| **Persistence Model** | **Resilient SQLite Event Sourcing** (resumes after restart/crash) | In-memory or ephemeral sessions | Ephemeral (lifetime of stdio pipe) |
+| **Team Hierarchy** | **Strict 5-Tier** (Watchdog → CEO → Manager → Specialists → Owner) | Flat peer-to-peer or unstructured swarm | Single-agent tool provider |
+| **Execution Harness** | **Dual Harness** (Native CLI Subprocesses + Direct API) | API-only (HTTP calls) | External tool execution only |
+| **Cost Optimization** | **Subscribed CLI Auth Pools** (Claude Code, Antigravity, Codex) | Per-token commercial billing only | Host application pays per call |
+| **Local-First Security** | **Air-gapped local storage**, zero telemetry, auto key-redaction | Cloud dashboard telemetry & logs | Depends on client implementation |
+| **Real-time Web Studio** | **Full-screen canvas**, live terminal streams, process monitors | Static CLI output or paid SaaS dashboard | None (headless) |
+| **Human In The Loop** | **Telegram Mobile Bridge** & Root Watchdog supervision | Webhooks or email alerts | Host client UI only |
+| **Tool Protocol** | **Full Model Context Protocol (MCP)** specification support | Custom proprietary tool schemes | MCP Standard |
 
 ---
 
-## 🗂️ Master Component Inventory
+## Key Architectural Capabilities
 
-| File Path | Primary Function & Architectural Role | Upgrades Implemented |
-|---|---|---|
-| `core/auth_pool.py` | Google Multi-Account Auth Manager | Isolated directories, Keyring vault swap/capture, sticky agent affinity, max-concurrent gates. |
-| `core/config.py` | System Settings & CLI Path Resolver | Provider settings, XPL keys, Antigravity/Codex auto-detection, and key redaction. |
-| `core/credential_store.py` | Keyring / Windows Vault Interface | Low-level credential read/write/delete methods for isolated terminal logins. |
-| `core/multimodal.py` | Telegram Multimodal Handler | Audio speech-to-text processing, image/video attachment downloading, and media token passing. |
-| `core/prompts.py` | Global System Prompts & Hard Rules | 5-tier escalation chain, Google pool mandate, CEO role protection, and model permission gates. |
-| `core/providers.py` | Provider Client Adapters | Experiential Labs adapter (`xpl`), OpenAI/Codex model routing, GLM streaming, and token normalizers. |
-| `core/service.py` | Daemon Lifecycle & Lockfiles | `ensure_engine()`, process startup file locking (`msvcrt`), descriptor validation, and health checks. |
-| `core/telegram_bridge.py` | Telegram Bot Supervisor | Chat ID whitelisting (`5644286697`), typing simulation, `[DISPATCH]` and `[SEND_FILE]` execution. |
-| `core/watchdog_brain.py` | Watchdog Decision Engine | ReAct audit loop, team tree inspection, and autonomous report generation. |
-| `engine/actions.py` | Team Action Dispatcher | Handlers for `spawn_worker`, `reconfigure_agent`, `send_team_message`, `escalate_to_ceo`, `terminate_worker`. |
-| `engine/loop_monitor.py` | Anti-Spinning Monitor | Inactivity timeout detection, runaway token loops, and stall mitigations. |
-| `engine/message_router.py` | Pub/Sub Event Bus | Asynchronous event broadcasting, WebSocket subscriptions, and cross-project routing. |
-| `engine/orchestrator.py` | Central Autonomous Runtime | Multi-agent execution loop, heartbeat management, harness supervision, SQLite state persistence. |
-| `engine/store.py` | SQLite State Storage | `team.sqlite3` persistence, event streaming ledger, and transaction rollback guards. |
-| `harness/cli_runner.py` | Subprocess CLI Interface | Spawns `agy`, `codex`, and `claude` with environment isolation and stdio streaming. |
-| `harness/direct_api.py` | Direct Provider API Client | High-performance HTTP client for direct API keys with streaming support. |
-| `mcp_server/server.py` | FastMCP Stdio Protocol Bridge | Exposes team tools (`list_projects`, `get_team_tree`, `spawn_worker`, etc.) over standard MCP. |
-| `web/app.py` | Web Studio API & WebSocket Server | REST endpoints for Auth Pool, static file serving, Starlette wildcard crash patch, `/ws` telemetry. |
-| `web/static/studio.js` | Web Studio Frontend Logic | Topological canvas, SVG link drawing, full-screen floor mode, live message animations, Auth Pool UI. |
-| `web/static/telemetry.js` | Metrics & Financial Visualizer | Token metering, cache ratio calculations, and provider burn tracking. |
-| `main.py` | Application Entrypoint | CLI parsing (`--serve`, `--mcp`, `--console`), Windows socket reuse handling, descriptor management. |
-| `AGENTS.md` | Master Sentinel Manifesto | Core operating doctrine, Telegram formatting rules, escalation hierarchy, autonomous directives spec. |
+### 1. Persistent Multi-Agent State & Event Sourcing
+Unlike ephemeral agent systems that lose all state on reload, Agentic Team MCP records all state mutations, messages, agent definitions, and task outcomes in an event-sourced SQLite database (`team.sqlite3`). If your system reboots, the engine reconstitutes the full agent graph and automatically resumes pending assignments.
+
+### 2. Multi-Account Google Auth Pool (`core/auth_pool.py`)
+- **Directory Isolation**: Per-account directory sandboxes (`auth/google/account_XX/`) with separate credential vaults.
+- **Windows Keyring Vault Swap**: Automated backup and capture of active tokens preventing profile contamination on Windows.
+- **Sticky KV-Cache Affinity**: Grants agents slot affinity (`forced_auth_slot_id`) to maximize prompt cache hits.
+- **Automatic 429 Quota Failover**: Detects rate limits or token saturation and fails over to healthy slots seamlessly.
+
+### 3. Multi-Harness Subsystem (`harness/`)
+- **Native CLI Subprocess Runners**: Directly leverages your active terminal subscriptions (`agy`, `codex`, `claude`) in headless mode without per-token charges.
+- **High-Throughput Direct API Client**: Async SSE streaming client supporting DeepSeek-V3/R1, Zhipu GLM, OpenAI, Experiential Labs (`xpl`), and Groq.
+- **Context Preservation & Handoffs**: Automatically serializes transcripts on model/harness switches (`manager/.handoffs/<hash>.json`) to prevent cognitive amnesia.
+
+### 4. Root Watchdog & Autonomous Telegram Bridge (`core/telegram_*`)
+- **Always-on Mobile Supervision**: Connect via Telegram (`@ufljarvisbot`) with strict chat ID whitelisting (`5644286697`).
+- **Human-like UX**: 4.5s typing simulation loop, mobile-first formatting, and automated `[DISPATCH]` & `[SEND_FILE]` directives.
+- **Multimodal Ingestion (`core/multimodal.py`)**: Audio voice notes are transcribed via speech-to-text; images and PDFs are converted to native vision tokens.
+
+### 5. Real-Time Web Studio GUI (`web/`)
+- **Full-Screen Team Floor**: Interactive node-link canvas showing agent states (`idle`, `working`, `resting`, `failed`). Click the fullscreen icon to expand the floor to the entire display.
+- **Live SVG Message Vectors**: Real-time traveling pulses along SVG vectors whenever agents exchange messages or report results.
+- **Comprehensive Telemetry**: Granular dashboards tracking `input_tokens`, `output_tokens`, `cache_read_tokens`, and provider burn in real time.
+
+### 6. Granular Security Boundary
+- **Strict Workspace Sandboxing**: Specialist workers operate strictly within their assigned project directories (`workers/<name>/`).
+- **Automatic Key Redaction**: Zero-secret leakage policy regex-redacts sensitive API keys and tokens across console streams and log files.
 
 ---
 
-## ⚡ 2-Minute Quickstart Guide
+## 2-Minute Quickstart Guide
+
+### Prerequisites
+- **Python 3.11+** installed and available on your system `PATH`.
+- **Git** installed.
+- *(Optional)* Installed CLI tools: `claude` ([Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview)), `agy` ([Antigravity CLI](https://github.com/google-gemini)), or `codex` ([OpenAI Codex](https://github.com/openai/codex)).
+
+---
 
 ### Step 1: Installation & Setup
 
 #### Windows (One-Click Setup)
+Clone the repository and run the automated PowerShell setup script:
 ```powershell
 git clone https://github.com/menma4ever/agentic-team-mcp.git
 cd agentic-team-mcp
@@ -151,23 +169,32 @@ cd agentic-team-mcp
 
 #### Manual Virtual Environment Setup (Cross-Platform)
 ```bash
+# 1. Clone the repository
 git clone https://github.com/menma4ever/agentic-team-mcp.git
 cd agentic-team-mcp
 
+# 2. Create and activate a Python virtual environment
 python -m venv .venv
-# Windows:
+
+# On Windows (PowerShell):
 .venv\Scripts\Activate.ps1
-# Linux / macOS:
+# On Linux / macOS:
 source .venv/bin/activate
 
+# 3. Install core dependencies
 pip install -r requirements.txt
 ```
 
+---
+
 ### Step 2: Configuration
+
+Copy the clean example settings template to `settings.json`:
 ```bash
 cp settings.example.json settings.json
 ```
-Edit `settings.json` with your preferred API keys or CLI toggles:
+
+Edit `settings.json` with your preferred API keys or enable local CLI harnesses:
 ```json
 {
   "api_keys": {
@@ -185,19 +212,45 @@ Edit `settings.json` with your preferred API keys or CLI toggles:
 }
 ```
 
-### Step 3: Launching Web Studio & Orchestrator
+---
+
+### Step 3: Launching the Platform
+
+#### Launch Web Studio & Orchestrator Engine
+On Windows, simply double-click `Launch.cmd` or run:
 ```cmd
 Launch.cmd
 ```
-Or manually:
+
+Alternatively, from an activated virtual environment:
 ```bash
 python main.py
 ```
-Opens browser at `http://127.0.0.1:8765/#token=<token>`.
+This automatically boots the background orchestrator service, launches the Web Studio GUI, and opens your default browser at `http://127.0.0.1:8765/#token=<token>`.
 
-### Step 4: Connecting via Model Context Protocol (MCP)
+#### Available Command-Line Arguments
+```text
+python main.py [OPTIONS]
 
-#### Claude Desktop Configuration (`claude_desktop_config.json`)
+Options:
+  --port INTEGER    Port for web studio & engine (default: 8765)
+  --no-browser      Start engine and studio without opening browser
+  --mcp             Run as stdio Model Context Protocol (MCP) server
+  --console TEXT    Open human-in-the-loop interactive console for agent
+```
+
+---
+
+### Step 4: Connecting to MCP Clients
+
+Agentic Team MCP operates as a high-performance stdio MCP server that connects directly to your background engine.
+
+#### Claude Desktop Configuration
+Add the server definition to your `claude_desktop_config.json`:
+
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+
 ```json
 {
   "mcpServers": {
@@ -212,7 +265,9 @@ Opens browser at `http://127.0.0.1:8765/#token=<token>`.
 }
 ```
 
-#### Cursor IDE Configuration (`.cursor/mcp.json`)
+#### Cursor IDE Configuration
+Add the configuration to `.cursor/mcp.json` in your workspace or global Cursor settings:
+
 ```json
 {
   "mcpServers": {
@@ -229,7 +284,9 @@ Opens browser at `http://127.0.0.1:8765/#token=<token>`.
 
 ---
 
-## 🛠️ Available MCP Tools Reference
+## Available MCP Tools Reference
+
+When connected via MCP, Agentic Team exposes a comprehensive set of orchestration tools:
 
 | Tool Name | Scope | Description |
 | :--- | :--- | :--- |
@@ -249,7 +306,64 @@ Opens browser at `http://127.0.0.1:8765/#token=<token>`.
 
 ---
 
-## 🤝 Community & Support
+## Directory Structure
+
+```text
+agentic-team-mcp/
+├── assets/                  # Studio screenshots & preview assets
+│   ├── web_studio_team_floor.png
+│   ├── web_studio_preview.gif
+│   └── web_studio_overview.png
+├── Launch.cmd               # Fast Windows launcher
+├── Setup.ps1                # Automated PowerShell virtualenv & dependency setup
+├── LICENSE                  # MIT License
+├── README.md                # Project documentation & guides
+├── requirements.txt         # Core dependencies
+├── settings.example.json    # Example configuration template
+├── main.py                  # Main entry point (Web Studio, Engine & MCP Server)
+├── core/                    # Core supervisor, telegram bridge, auth pool & config
+│   ├── auth_pool.py         # Multi-account rotation & CLI auth slots
+│   ├── catalog.py           # Dynamic model & harness discovery
+│   ├── config.py            # Pydantic schema validation & redaction
+│   ├── credential_store.py  # Secure local credential storage
+│   ├── multimodal.py        # Visual analysis & image processing
+│   ├── service.py           # Engine lifecycle & process locking
+│   ├── telegram_bridge.py   # Telegram supervisor bridge & alert loop
+│   ├── telegram_supervisor.py # Interactive mobile control endpoints
+│   ├── watchdog_brain.py    # Root Watchdog intelligence & evaluation
+│   └── workspace.py         # Sandboxed workspace directories
+├── engine/                  # Orchestration core & persistence
+│   ├── actions.py           # Agent action handlers & dispatching
+│   ├── loop_monitor.py      # Stuck-loop detection & runaway turn prevention
+│   ├── message_router.py    # Priority messaging & event routing
+│   ├── models.py            # Pydantic data models for agents & tasks
+│   ├── orchestrator.py      # Central event loop & agent scheduler
+│   └── store.py             # SQLite event-sourcing database layer
+├── harness/                 # Subprocess & provider execution harnesses
+│   ├── cli_runner.py        # PTY/pipe adapters for Claude, Antigravity, Codex
+│   └── direct_api.py        # Direct async streaming HTTP API client
+├── mcp_server/              # Model Context Protocol stdio server
+│   └── server.py            # FastMCP tool declarations & engine proxy
+├── tests/                   # End-to-end integration & unit test suites
+│   ├── test_auth_pool.py
+│   ├── test_backend_audit.py
+│   ├── test_engine.py
+│   ├── test_google_quota_recovery.py
+│   ├── test_release.py
+│   ├── test_runtime_revision.py
+│   ├── test_service.py
+│   ├── test_telegram_bridge.py
+│   └── test_watchdog_brain.py
+└── web/                     # Web Studio dashboard & REST API
+    ├── app.py               # FastAPI server & WebSocket endpoints
+    └── static/              # Interactive graph, terminal streams, and UI
+```
+
+---
+
+## Community & Feedback
+
+We welcome contributions, feedback, and questions from researchers and builders working on autonomous multi-agent systems and MCP tooling.
 
 - **Telegram:** [@zwyci](https://t.me/zwyci) / Bot: [@ufljarvisbot](https://t.me/ufljarvisbot)
 - **Discord:** `77terminator77`
@@ -258,6 +372,6 @@ Opens browser at `http://127.0.0.1:8765/#token=<token>`.
 
 ---
 
-## 📄 License
+## License
 
 Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for complete terms.
