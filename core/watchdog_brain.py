@@ -673,13 +673,76 @@ class WatchdogBrain:
                 f"{wf_text}"
                 f"{worker_info}"
             )
-        else:
             err = (res.get("detail") if res else None) or "Execution queue busy or agent already active."
             return (
                 f"{prefix}⚠️ *Resume request for {a_name}*: `{err}`.\n"
                 f"(Current status: `{current_status}`)"
                 f"{worker_info}"
             )
+
+    def handle_fleet_optimization(self, state: Dict[str, Any], lower_text: str) -> Optional[str]:
+        """Handles requests to optimize the fleet, heal/sync failed agents, prune workers, and diagnose failures."""
+        if not re.search(r"\b(optimize|heal|fix failed|failed sync|why it failed|sync failed|optimizer|prune)\b", lower_text):
+            return None
+
+        proj = state.get("active_project")
+        if not proj:
+            return "⚠️ No active project found to optimize."
+
+        # Check for worker pruning request
+        if re.search(r"\b(prune|delete unneeded|clean workers|cleanup workers)\b", lower_text):
+            workers = state.get("workers", [])
+            terminated = []
+            for w in workers:
+                if w.get("status") in ("idle", "completed") and w.get("name") not in ("Release_Manager",):
+                    wid = w.get("id")
+                    if wid:
+                        res = self._api_post("/api/action", {
+                            "project_name": proj,
+                            "action": "terminate_worker",
+                            "arguments": {"worker_id": wid, "cleanup_folder": True}
+                        })
+                        if res:
+                            terminated.append(w.get("name", wid))
+            if terminated:
+                return (
+                    f"🛡️ **Root Watchdog Fleet Optimizer**\n\n"
+                    f"🟢 **Pruned {len(terminated)} obsolete worker(s):**\n"
+                    f"• " + "\n• ".join(terminated) + "\n\n"
+                    f"Workspace hygiene restored without sinking or overfilling the team."
+                )
+            else:
+                return "🛡️ **Root Watchdog Fleet Optimizer**\n\n🟢 All active workers are actively assigned or essential. No obsolete workers to prune."
+
+        # Execute fleet optimization
+        res = self._api_post("/api/action", {
+            "project_name": proj,
+            "action": "optimize_fleet",
+            "arguments": {}
+        })
+
+        if not res or not res.get("fleet_optimized"):
+            return "🛡️ **Root Watchdog Fleet Optimizer**\n\n🟢 Evaluated fleet state: All agents are operating nominally or waiting for next turn. No failed agents detected."
+
+        healed_count = res.get("healed_count", 0)
+        results = res.get("results", [])
+
+        if healed_count == 0:
+            failed_agents = [w for w in state.get("workers", []) if w.get("status") == "failed"]
+            if failed_agents:
+                lines = ["🛡️ **Root Watchdog Fleet Optimizer Diagnostic**\n"]
+                for fa in failed_agents:
+                    lines.append(f"• ⚠️ **{fa.get('name')}** (Model: `{fa.get('model')}`): {fa.get('last_error', 'Unknown failure')}")
+                lines.append("\n*Diagnosis: Requires human instruction or quota reset.*")
+                return "\n".join(lines)
+            return "🛡️ **Root Watchdog Fleet Optimizer**\n\n🟢 Fleet audit complete. No agents required healing; all assigned models are synchronized."
+
+        lines = [f"🛡️ **Root Watchdog Fleet Optimizer**\n\n🟢 **Successfully healed & synchronized {healed_count} agent(s) on exact models:**\n"]
+        for r in results:
+            if r.get("result", {}).get("healed"):
+                lines.append(f"• 🟢 **{r.get('name')}** — {r.get('result', {}).get('action')}")
+        lines.append("\n*All agents preserved on their exact assigned models without unauthorized mutations.*")
+        return "\n".join(lines)
 
     def handle_project_launch(self, user_text: str) -> Optional[str]:
         """Handles interactive project creation with parameter extraction and CEO prompting."""
@@ -1759,7 +1822,14 @@ Your Full Antigravity CLI & MCP Powers:
         if not executed_directive_note and re.search(r"\b(resume|wake|unpause|unblock|kick)\b", lower):
             executed_resume_note = self.handle_resume_agent(state, lower)
 
-        # 7. Full Antigravity CLI Agent Turn
+        # 7. Watchdog Fleet Optimizer: auto-diagnose and heal failed agents or prune unneeded workers
+        executed_optimize_note = None
+        if not executed_directive_note and not executed_resume_note and re.search(r"\b(optimize|heal|fix failed|failed sync|why it failed|sync failed|optimizer|prune)\b", lower):
+            executed_optimize_note = self.handle_fleet_optimization(state, lower)
+            if executed_optimize_note:
+                return executed_optimize_note, None
+
+        # 8. Full Antigravity CLI Agent Turn
         system_prompt = self._build_system_prompt(state)
         if executed_directive_note:
             system_prompt += f"\n\n[Immediate Engine Action Executed Before Turn]:\n{executed_directive_note}\n"

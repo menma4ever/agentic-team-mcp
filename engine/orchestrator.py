@@ -565,13 +565,17 @@ class Orchestrator:
                 a.status = AgentStatus.PAUSED
                 a.last_error = str(exc)
                 await self.emit(a,'auth_blocked',{'error':a.last_error})
-                await self._parent_notice(a, f'{a.name} paused: {a.last_error}', kind='escalation')
+                heal_res = await self.auto_diagnose_and_heal_agent(a.id, retry_turn=True)
+                if not heal_res.get('healed'):
+                    await self._parent_notice(a, f'{a.name} paused: {a.last_error}', kind='escalation')
                 break
             except Exception as exc:
                 a.status = AgentStatus.FAILED
                 a.last_error = self.config.redact(exc)
                 await self.emit(a,'error',{'error':a.last_error})
-                await self._parent_notice(a,f'Execution failed for {a.name}: {a.last_error}',kind='escalation')
+                heal_res = await self.auto_diagnose_and_heal_agent(a.id, retry_turn=True)
+                if not heal_res.get('healed'):
+                    await self._parent_notice(a,f'Execution failed for {a.name}: {a.last_error}',kind='escalation')
             finally:
                 self.active.pop(aid,None)
                 self.inflight.pop(aid,None)
@@ -696,6 +700,16 @@ class Orchestrator:
             return {'resumed':True}
         if name == 'terminate_worker':
             return await self.terminate_worker(project,**args)
+        if name in ('optimize_agent', 'heal_agent'):
+            target_id = args.get('target_agent_id') or args.get('agent_id')
+            return await self.auto_diagnose_and_heal_agent(target_id)
+        if name == 'optimize_fleet':
+            results = []
+            for ag in list(self.agents.values()):
+                if ag.project_name == project and ag.status in (AgentStatus.FAILED, AgentStatus.PAUSED):
+                    res = await self.auto_diagnose_and_heal_agent(ag.id)
+                    results.append({'agent_id': ag.id, 'name': ag.name, 'result': res})
+            return {'fleet_optimized': True, 'healed_count': sum(1 for r in results if r['result'].get('healed')), 'results': results}
         # Owner may inspect project files through the CEO's scope.
         a=actor or self.get_ceo(project)
         if name in ('read_file','write_file','list_files'):
@@ -1089,3 +1103,75 @@ class Orchestrator:
         self.persist()
         await self.emit(a, 'configuration_changed', {'previous': old, 'model': a.model, 'harness': a.harness.value})
         await self.router.broadcast('agent_updated', a.model_dump(exclude={'system_prompt'}))
+
+    async def auto_diagnose_and_heal_agent(self, agent_id: str, retry_turn: bool = True) -> Dict[str, Any]:
+        """Watchdog Fleet Optimizer:
+        Inspects why an agent failed or stalled, auto-diagnoses the root cause,
+        heals transient quota/timeout/session issues, preserves the exact model lock,
+        and safely resumes execution without requiring human intervention.
+        """
+        if not agent_id or agent_id not in self.agents:
+            return {'healed': False, 'reason': f"Agent '{agent_id}' not found"}
+        a = self.agents[agent_id]
+        if a.status not in (AgentStatus.FAILED, AgentStatus.PAUSED):
+            return {'healed': False, 'reason': f"Agent status is {a.status.value}, does not require healing"}
+
+        err = (a.last_error or '').lower()
+        model = a.model
+        action_taken = None
+
+        # 1. Google Auth Pool / Quota saturation (RESOURCE_EXHAUSTED / 429)
+        if any(k in err for k in ('resource_exhausted', '429', 'quota', 'rate limit', 'cooldown')):
+            healed = self.auth_pool.heal_expired_cooldowns()
+            a.auth_slot_id = None
+            a.last_error = None
+            a.status = AgentStatus.IDLE
+            action_taken = f"Rotated Google auth slot; auto-healed cooldowns ({len(healed)} healed); locked to exact model '{model}'."
+
+        # 2. CLI Subprocess Print Timeout / Broken Pipe / Timed out
+        elif any(k in err for k in ('print timeout', 'timeout', 'broken pipe', 'timed out')):
+            self.auth_pool.heal_expired_cooldowns()
+            a.session_id = None
+            a.last_error = None
+            a.status = AgentStatus.IDLE
+            action_taken = f"Cleared transient CLI timeout & reset session ID; auto-resumed on exact model '{model}'."
+
+        # 3. Session state desync / Conversation not found / Subscriber fell behind
+        elif any(k in err for k in ('conversation not found', 'subscriber fell behind', 'invalid session')):
+            a.session_id = None
+            a.google_session_dir = None
+            a.last_error = None
+            a.status = AgentStatus.IDLE
+            action_taken = f"Purged desynchronized session state; fresh turn scheduled on exact model '{model}'."
+
+        # 4. Worker completed turn without formal report_result call
+        elif a.role == Role.WORKER and 'without report_result' in err:
+            a.status = AgentStatus.IDLE
+            a.last_error = None
+            action_taken = f"Nudged worker to inspect deliverables and seal formal report on exact model '{model}'."
+
+        # 5. Missing / malformed effort flag on Gemini Flash
+        elif 'requires --effort' in err or 'invalid model selection' in err:
+            if 'flash' in model.lower():
+                a.reasoning_effort = 'high'
+            a.last_error = None
+            a.status = AgentStatus.IDLE
+            action_taken = f"Normalized reasoning effort flag for exact model '{model}'; auto-resumed."
+
+        if action_taken:
+            self._write_status(a)
+            self.persist()
+            await self.emit(a, 'watchdog_optimizer_healed', {'action': action_taken, 'model': model})
+            await self.router.broadcast('agent_updated', a.model_dump(exclude={'system_prompt'}))
+            if retry_turn:
+                if a.id in self.paused:
+                    raw = self.paused.pop(a.id)
+                    raw_content = raw.get('content') if isinstance(raw, dict) else getattr(raw, 'content', str(raw))
+                    sender_id = raw.get('sender_id', 'system_root_watchdog') if isinstance(raw, dict) else getattr(raw, 'sender_id', 'system_root_watchdog')
+                    kind = raw.get('kind', 'resume') if isinstance(raw, dict) else getattr(raw, 'kind', 'resume')
+                    await self.send(a.project_name, a.id, raw_content, sender_id=sender_id, kind=kind)
+                elif self.inboxes.get(a.id) or a.current_task:
+                    await self.resume_agent(a.project_name, a.id, actor_id='system_root_watchdog')
+            return {'healed': True, 'action': action_taken, 'model': model}
+
+        return {'healed': False, 'reason': f"Non-recoverable failure requires human instruction: {a.last_error}"}
