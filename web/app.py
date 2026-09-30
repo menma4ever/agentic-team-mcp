@@ -152,17 +152,26 @@ def create_app(engine,owner_token,instance_id='test'):
 
         cli_runner = getattr(engine, 'cli', None)
         if harness == HarnessType.CODEX:
-            try:
-                codex_parts = cli_runner.resolve('codex') if cli_runner else ['codex']
-                codex_cmd = codex_parts[0]
-            except Exception:
-                codex_cmd = 'codex'
+            codex_cmd = None
+            if cli_runner:
+                try:
+                    codex_parts = cli_runner.resolve('codex')
+                    codex_cmd = codex_parts[0]
+                except Exception:
+                    pass
+            if not codex_cmd:
+                codex_cmd = engine.runner.config.cli_executable('codex') or 'codex'
             target_model = a.model.split('/', 1)[-1].lower().replace(' ', '-').replace('_', '-')
             provider_prefix = a.model.split('/', 1)[0] if '/' in a.model else getattr(a, 'provider', None)
             extra_provider_args = ""
+            env_prelude = ""
             if provider_prefix in ('experiential', 'xpl'):
                 key = engine.runner.config.get_api_key('experiential') or engine.runner.config.get_api_key('xpl') or ''
                 env['EXP_API_KEY'] = key
+                codex_home = working_dir / '.codex-team'
+                env['CODEX_HOME'] = str(codex_home)
+                safe_codex_home = str(codex_home).replace("'", "''")
+                env_prelude += f"$env:EXP_API_KEY = '{key}'; $env:CODEX_HOME = '{safe_codex_home}'; "
                 extra_provider_args = (
                     " -c 'model_provider=\"experiential\"'"
                     " -c 'model_providers.experiential.name=\"Experiential Labs\"'"
@@ -176,6 +185,10 @@ def create_app(engine,owner_token,instance_id='test'):
                 env[var_name] = key
                 p_info = engine.runner.config.providers[provider_prefix]
                 b_url = p_info.base_url or 'https://api.experientiallabs.ai/v1'
+                codex_home = working_dir / '.codex-team'
+                env['CODEX_HOME'] = str(codex_home)
+                safe_codex_home = str(codex_home).replace("'", "''")
+                env_prelude += f"$env:{var_name} = '{key}'; $env:CODEX_HOME = '{safe_codex_home}'; "
                 extra_provider_args = (
                     f" -c 'model_provider=\"{provider_prefix}\"'"
                     f" -c 'model_providers.{provider_prefix}.name=\"{provider_prefix}\"'"
@@ -189,6 +202,7 @@ def create_app(engine,owner_token,instance_id='test'):
                 cli_call = f"& '{codex_cmd}' --model '{target_model}'{extra_provider_args}"
             ps_script = (
                 f"$host.UI.RawUI.WindowTitle = '{title}'; "
+                f"{env_prelude}"
                 f"{header_banner}"
                 f"Write-Host 'Launching interactive Codex CLI session...' -ForegroundColor Green; "
                 f"{cli_call}"
@@ -232,12 +246,63 @@ def create_app(engine,owner_token,instance_id='test'):
                 agy_cmd = agy_parts[0]
             except Exception:
                 agy_cmd = 'agy'
-            if a.session_id:
-                cli_call = f"& '{agy_cmd}' --conversation '{a.session_id}'"
+
+            auth_dir = None
+            if getattr(a, 'google_session_dir', None) and a.google_session_dir != '@default':
+                auth_dir = Path(a.google_session_dir).resolve()
+            elif getattr(a, 'auth_slot_id', None) and getattr(engine, 'auth_pool', None):
+                acc = engine.auth_pool.accounts.get(a.auth_slot_id)
+                if acc:
+                    auth_dir = engine.auth_pool.resolve_auth_dir(acc).resolve()
+
+            account_id = getattr(a, 'auth_slot_id', None)
+            if not account_id and auth_dir and getattr(engine, 'auth_pool', None):
+                for acc_id, acc in engine.auth_pool.accounts.items():
+                    if engine.auth_pool.resolve_auth_dir(acc).resolve() == auth_dir:
+                        account_id = acc_id
+                        break
+            if account_id and getattr(engine, 'auth_pool', None):
+                try:
+                    engine.auth_pool.activate_account_credential(account_id)
+                except Exception:
+                    pass
+
+            env_prelude = ""
+            has_conversation = False
+            if auth_dir and auth_dir.is_dir():
+                auth_str = str(auth_dir).replace("'", "''")
+                app_data_str = str(auth_dir / '.gemini' / 'antigravity').replace("'", "''")
+                env['USERPROFILE'] = str(auth_dir)
+                env['HOME'] = str(auth_dir)
+                env['ANTIGRAVITY_APP_DATA_DIR'] = str(auth_dir / '.gemini' / 'antigravity')
+                env_prelude = (
+                    f"$env:USERPROFILE = '{auth_str}'; "
+                    f"$env:HOME = '{auth_str}'; "
+                    f"$env:ANTIGRAVITY_APP_DATA_DIR = '{app_data_str}'; "
+                )
+                if a.session_id:
+                    conv_db = auth_dir / '.gemini' / 'antigravity-cli' / 'conversations' / f"{a.session_id}.db"
+                    has_conversation = conv_db.is_file()
+            elif a.session_id:
+                conv_db = Path.home() / '.gemini' / 'antigravity-cli' / 'conversations' / f"{a.session_id}.db"
+                has_conversation = conv_db.is_file()
+
+            target_model = a.model.split('/', 1)[-1]
+            model_args = f" --model '{target_model}'"
+            effort = getattr(a, 'reasoning_effort', None)
+            if not effort and target_model == 'gemini-3.8-flash':
+                effort = 'medium'
+            if effort:
+                model_args += f" --effort '{effort}'"
+
+            if a.session_id and has_conversation:
+                cli_call = f"& '{agy_cmd}' --conversation '{a.session_id}'{model_args}"
             else:
-                cli_call = f"& '{agy_cmd}'"
+                cli_call = f"& '{agy_cmd}'{model_args}"
+
             ps_script = (
                 f"$host.UI.RawUI.WindowTitle = '{title}'; "
+                f"{env_prelude}"
                 f"{header_banner}"
                 f"Write-Host 'Launching interactive Antigravity CLI session...' -ForegroundColor Green; "
                 f"{cli_call}"
@@ -301,7 +366,10 @@ def create_app(engine,owner_token,instance_id='test'):
 
     @app.post('/api/action')
     async def action(req:ActionRequest,request:Request):
-        return await engine.action(req.project_name,req.action,req.arguments,request.state.actor)
+        try:
+            return await engine.action(req.project_name,req.action,req.arguments,request.state.actor)
+        except (ValueError, PermissionError, RuntimeError) as exc:
+            raise HTTPException(400, str(exc))
 
     @app.post('/api/chat')
     async def chat(request:Request):

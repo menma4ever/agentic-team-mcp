@@ -228,7 +228,7 @@ function computeTreeLayout(treeData, containerW=900){
   const watchdogs=(treeData?.watchdog?[treeData.watchdog]:[]).filter(Boolean);
 
   const floorW=Math.max(640,(containerW||900)-16);
-  const cardW=196, gapX=20, stepX=cardW+gapX, stepY=214;
+  const cardW=200, gapX=22, stepX=cardW+gapX, stepY=260;
   const n=workers.length;
   const maxColsFit=Math.max(1,Math.floor((floorW-32+gapX)/stepX));
   const cols=Math.min(Math.max(1,n),maxColsFit);
@@ -240,13 +240,13 @@ function computeTreeLayout(treeData, containerW=900){
   const positions=new Map();
 
   watchdogs.forEach(a=>{
-    positions.set(a.id,{x:watchdogX,y:126});
+    positions.set(a.id,{x:watchdogX,y:155});
   });
   ceos.forEach(a=>{
-    positions.set(a.id,{x:Math.round(centerX-cardW/2),y:20});
+    positions.set(a.id,{x:Math.round(centerX-cardW/2),y:24});
   });
   managers.forEach(a=>{
-    positions.set(a.id,{x:Math.round(centerX-cardW/2),y:226});
+    positions.set(a.id,{x:Math.round(centerX-cardW/2),y:295});
   });
 
   const numRows=Math.ceil(Math.max(1,n)/cols);
@@ -257,13 +257,13 @@ function computeTreeLayout(treeData, containerW=900){
     if(countInRow<=0)break;
     const rowW=countInRow*cardW+(countInRow-1)*gapX;
     const startX=Math.max(16,Math.round((floorW-rowW)/2));
-    const rowY=438+r*stepY;
+    const rowY=580+r*stepY;
     for(let j=0;j<countInRow;j++){
       const a=workers[startIdx+j];
       positions.set(a.id,{x:Math.round(startX+j*stepX),y:rowY});
     }
   }
-  const maxY=438+Math.max(1,numRows)*stepY+28;
+  const maxY=580+Math.max(1,numRows)*stepY+40;
   return {positions,width:Math.round(floorW),height:Math.round(maxY)};
 }
 
@@ -350,7 +350,25 @@ function updateActors(){
     c.classList.toggle('error-state',!!isErrorState);
     c.classList.toggle('selected',active?.id===a.id);
     c.querySelector('.actor-status').textContent=states[a.status]||a.status;
-    c.querySelector('.actor-usage').textContent=u.reported?count(u.input+u.output)+' tokens':u.estimated?count(u.estimated)+' estimated tokens':'Usage not reported';
+    const usageEl=c.querySelector('.actor-usage');
+    usageEl.replaceChildren();
+    if(u.reported){
+      const rowMain=el('span',`In: ${count(u.input)} · Out: ${count(u.output)}`,'usage-row-main');
+      usageEl.append(rowMain);
+      if(u.cacheKnown && u.cache){
+        const cacheChip=el('span',`Cache: ${count(u.cache)}`,'usage-cache-chip');
+        usageEl.append(cacheChip);
+      }
+      usageEl.title=`Input: ${u.input.toLocaleString()} | Output: ${u.output.toLocaleString()}${u.cacheKnown ? ' | Cache: ' + u.cache.toLocaleString() : ''}`;
+    }else if(u.estimated){
+      const rowMain=el('span',`Est: ${count(u.estimated)} tokens`,'usage-row-main');
+      usageEl.append(rowMain);
+      usageEl.title=`Estimated: ${u.estimated.toLocaleString()} tokens`;
+    }else{
+      const rowMain=el('span','Usage not reported','usage-row-main');
+      usageEl.append(rowMain);
+      usageEl.title='';
+    }
     c.title=pretty(a.name)+' · '+(l.activity.at(-1)?.text.slice(0,220)||a.current_task);
   }
 }
@@ -363,43 +381,145 @@ function point(id,bottom){
   return{x:r.left+r.width/2-box.left,y:(bottom?r.bottom:r.top)-box.top};
 }
 
+function actorRect(id){
+  const c=document.querySelector(`.actor[data-agent="${id}"]`);
+  if(!c)return null;
+  const box=$('tree').getBoundingClientRect();
+  const r=c.getBoundingClientRect();
+  return{
+    left:r.left-box.left,
+    right:r.right-box.left,
+    top:r.top-box.top,
+    bottom:r.bottom-box.top,
+    width:r.width,
+    height:r.height,
+    centerX:r.left+r.width/2-box.left,
+    centerY:r.top+r.height/2-box.top
+  };
+}
+
+let activeFlight=null;
+let activeFlightTimer=null;
+
+function addPulseOrb(svg,pathD,dur='1.4s'){
+  const group=svgEl('g',{'class':'comm-pulse-group'});
+  const aura=svgEl('circle',{r:7,fill:'#fbbf24',opacity:'0.45'});
+  const auraMotion=svgEl('animateMotion',{dur:dur,repeatCount:'indefinite',path:pathD});
+  aura.append(auraMotion);
+  const dot=svgEl('circle',{r:4,fill:'#ffffff',stroke:'#f59e0b','stroke-width':'2'});
+  const dotMotion=svgEl('animateMotion',{dur:dur,repeatCount:'indefinite',path:pathD});
+  dot.append(dotMotion);
+  group.append(aura,dot);
+  svg.append(group);
+}
+
 function drawLinks(flight){
   const svg=$('team-links');if(!svg)return;svg.replaceChildren();const box=$('tree').getBoundingClientRect();svg.setAttribute('viewBox',`0 0 ${box.width} ${box.height}`);
-  
-  // 1. Hierarchy links (parent_id)
-  for(const a of agents()){
-    if(!a.parent_id)continue;const p=point(a.parent_id,true),q=point(a.id,false);if(!p||!q)continue;
-    const d=`M${p.x},${p.y} C${p.x},${(p.y+q.y)/2} ${q.x},${(p.y+q.y)/2} ${q.x},${q.y}`;
-    svg.append(svgEl('path',{d,'class':'hierarchy-link'}));
+
+  if(flight){
+    activeFlight=flight;
+    if(activeFlightTimer)clearTimeout(activeFlightTimer);
+    activeFlightTimer=setTimeout(()=>{activeFlight=null;drawLinks();},4500);
   }
-  
+  const currentFlight=flight||activeFlight;
+  let flightMatched=false;
+
+  // 1. Hierarchy links (parent_id)
+  const mgrRect=tree?.manager?actorRect(tree.manager.id):null;
+  for(const a of agents()){
+    if(!a.parent_id)continue;
+    const parent=agentIndex.get(a.parent_id);
+    const p=point(a.parent_id,true),q=point(a.id,false);
+    if(!p||!q)continue;
+
+    const isFlight=currentFlight&&(
+      (currentFlight.sender_id===a.parent_id&&currentFlight.recipient_id===a.id)||
+      (currentFlight.sender_id===a.id&&currentFlight.recipient_id===a.parent_id)
+    );
+    if(isFlight)flightMatched=true;
+
+    // Directional orientation: path runs from sender to recipient during communications
+    const isUpstream=isFlight&&currentFlight.sender_id===a.id;
+    const startPt=isUpstream?q:p;
+    const endPt=isUpstream?p:q;
+
+    let d;
+    // When CEO deploys a worker, route visibly around Manager's flank instead of passing under Manager
+    const isCeoToWorker=(parent?.role==='CEO'&&a.role!=='MANAGER'&&mgrRect);
+    if(isCeoToWorker){
+      const workerRect=actorRect(a.id);
+      const workerCenterX=workerRect?workerRect.centerX:q.x;
+      const bypassRight=workerCenterX>=mgrRect.centerX;
+      const offset=48+Math.min(60,Math.abs(workerCenterX-mgrRect.centerX)*0.12);
+      const bypassX=bypassRight?Math.max(mgrRect.right+offset,(p.x+q.x)/2):Math.min(mgrRect.left-offset,(p.x+q.x)/2);
+
+      if(!isUpstream){
+        d=`M${startPt.x},${startPt.y} C${bypassX},${startPt.y+60} ${bypassX},${endPt.y-80} ${endPt.x},${endPt.y}`;
+      }else{
+        d=`M${startPt.x},${startPt.y} C${bypassX},${startPt.y-80} ${bypassX},${endPt.y+60} ${endPt.x},${endPt.y}`;
+      }
+    }else{
+      const midY=(startPt.y+endPt.y)/2;
+      d=`M${startPt.x},${startPt.y} C${startPt.x},${midY} ${endPt.x},${midY} ${endPt.x},${endPt.y}`;
+    }
+
+    const cls=isFlight?'hierarchy-link active-comm':'hierarchy-link';
+    svg.append(svgEl('path',{d,'class':cls}));
+    if(isFlight)addPulseOrb(svg,d);
+  }
+
   // 2. Supervisory Watchdog links (Watchdog -> CEO & Manager)
-  const wd = tree?.watchdog;
+  const wd=tree?.watchdog;
   if(wd){
-    const wdActor = document.querySelector(`.actor[data-agent="${wd.id}"]`);
+    const wdActor=document.querySelector(`.actor[data-agent="${wd.id}"]`);
     if(wdActor){
-      const wr = wdActor.getBoundingClientRect();
-      const p = {x: wr.right - box.left, y: wr.top + wr.height/2 - box.top};
+      const wr=wdActor.getBoundingClientRect();
+      const p={x:wr.right-box.left,y:wr.top+wr.height/2-box.top};
       for(const targetId of (wd.connections||[])){
-        const targetActor = document.querySelector(`.actor[data-agent="${targetId}"]`);
+        const targetActor=document.querySelector(`.actor[data-agent="${targetId}"]`);
         if(!targetActor)continue;
-        const tr = targetActor.getBoundingClientRect();
-        const q = {x: tr.left - box.left, y: tr.top + tr.height/2 - box.top};
-        const midX = (p.x + q.x) / 2;
-        const d = `M${p.x},${p.y} C${midX},${p.y} ${midX},${q.y} ${q.x},${q.y}`;
-        svg.append(svgEl('path',{d,'class':'watchdog-link','title':'Supervisory Conduit to '+pretty(agentIndex.get(targetId)?.name||'Agent')}));
+        const tr=targetActor.getBoundingClientRect();
+        const q={x:tr.left-box.left,y:tr.top+tr.height/2-box.top};
+
+        const isFlight=currentFlight&&(
+          (currentFlight.sender_id===wd.id&&currentFlight.recipient_id===targetId)||
+          (currentFlight.sender_id===targetId&&currentFlight.recipient_id===wd.id)
+        );
+        if(isFlight)flightMatched=true;
+
+        const isReversed=isFlight&&currentFlight.sender_id===targetId;
+        const startPt=isReversed?q:p;
+        const endPt=isReversed?p:q;
+        const midX=(startPt.x+endPt.x)/2;
+        const d=`M${startPt.x},${startPt.y} C${midX},${startPt.y} ${midX},${endPt.y} ${endPt.x},${endPt.y}`;
+
+        const cls=isFlight?'watchdog-link active-comm':'watchdog-link';
+        svg.append(svgEl('path',{d,'class':cls,'title':'Supervisory Conduit to '+pretty(agentIndex.get(targetId)?.name||'Agent')}));
+        if(isFlight)addPulseOrb(svg,d);
       }
     }
   }
 
   // 3. Custom graph connections (connections)
   for(const a of agents()){
-    if(a.role === 'WATCHDOG') continue;
+    if(a.role==='WATCHDOG')continue;
     for(const targetId of (a.connections||[])){
       if(targetId===a.parent_id)continue;
       const p=point(a.id,true),q=point(targetId,false);if(!p||!q)continue;
-      const d=`M${p.x},${p.y} C${p.x+30},${(p.y+q.y)/2} ${q.x-30},${(p.y+q.y)/2} ${q.x},${q.y}`;
-      const pathEl=svgEl('path',{d,'class':'custom-link','title':'Collaboration link (click to remove)'});
+
+      const isFlight=currentFlight&&(
+        (currentFlight.sender_id===a.id&&currentFlight.recipient_id===targetId)||
+        (currentFlight.sender_id===targetId&&currentFlight.recipient_id===a.id)
+      );
+      if(isFlight)flightMatched=true;
+
+      const isReversed=isFlight&&currentFlight.sender_id===targetId;
+      const startPt=isReversed?q:p;
+      const endPt=isReversed?p:q;
+
+      const d=`M${startPt.x},${startPt.y} C${startPt.x+30},${(startPt.y+endPt.y)/2} ${endPt.x-30},${(startPt.y+endPt.y)/2} ${endPt.x},${endPt.y}`;
+      const cls=isFlight?'custom-link active-comm':'custom-link';
+      const pathEl=svgEl('path',{d,'class':cls,'title':'Collaboration link (click to remove)'});
       const hit=svgEl('path',{d,'class':'link-hitbox'});
       hit.addEventListener('click',guard(async()=>{
         if(confirm(`Sever connection between ${pretty(a.name)} and ${pretty(agentIndex.get(targetId)?.name||'agent')}?`)){
@@ -410,15 +530,37 @@ function drawLinks(flight){
         }
       }));
       svg.append(pathEl,hit);
+      if(isFlight)addPulseOrb(svg,d);
     }
   }
 
-  // 3. Flight animations
-  if(flight){
-    const p=point(flight.sender_id,true),q=point(flight.recipient_id,false);if(p&&q){
-      const d=`M${p.x},${p.y} Q${(p.x+q.x)/2+70},${(p.y+q.y)/2} ${q.x},${q.y}`;
-      const path=svgEl('path',{d,'class':'message-link'});svg.append(path);
-      const dot=svgEl('circle',{r:4,fill:'#d9edb4'}),motion=svgEl('animateMotion',{dur:'1.8s',repeatCount:3,path:d});dot.append(motion);svg.append(dot);setTimeout(()=>drawLinks(),5600);
+  // 4. Direct message flight fallback (if not already connected by a link)
+  if(!flightMatched&&currentFlight){
+    const sRect=actorRect(currentFlight.sender_id);
+    const rRect=actorRect(currentFlight.recipient_id);
+    if(sRect&&rRect){
+      let p,q;
+      if(Math.abs(sRect.centerY-rRect.centerY)<60){
+        if(sRect.centerX<rRect.centerX){
+          p={x:sRect.right,y:sRect.centerY};
+          q={x:rRect.left,y:rRect.centerY};
+        }else{
+          p={x:sRect.left,y:sRect.centerY};
+          q={x:rRect.right,y:rRect.centerY};
+        }
+      }else if(sRect.centerY<rRect.centerY){
+        p={x:sRect.centerX,y:sRect.bottom};
+        q={x:rRect.centerX,y:rRect.top};
+      }else{
+        p={x:sRect.centerX,y:sRect.top};
+        q={x:rRect.centerX,y:rRect.bottom};
+      }
+      const midX=(p.x+q.x)/2;
+      const midY=(p.y+q.y)/2;
+      const d=`M${p.x},${p.y} Q${midX+(p.x>q.x?-35:35)},${midY-40} ${q.x},${q.y}`;
+      const pathEl=svgEl('path',{d,'class':'message-direct-link active-comm'});
+      svg.append(pathEl);
+      addPulseOrb(svg,d);
     }
   }
 }

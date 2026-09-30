@@ -1,55 +1,41 @@
-# Python environment & dependencies
 .venv/
-venv/
-env/
-dist/
-build/
-*.egg-info/
-
-# Bytecode & caches
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-
-# Agentic Team runtime & persistence
+settings.json
 projects/
-work/
-backups/
 team.sqlite3*
-*.db
-*.db-*
 engine.json
 engine.log
 engine.start.lock
-engine-recovery-*.log
+tests/.tmp/
 
-# Sensitive configurations, credentials & keys
-settings.json
+# Private local state and credentials: never publish with source.
 auth/
 google_accounts.json
 google_accounts.*.json
-credential.dat
-*.pem
-*.key
-*.dat
-
-# Output, temporary & log files
+settings.tmp
+engine.tmp
+.env
+.env.*
+!.env.example
 *.log
 err.txt
 out.txt
-*.tmp
+*.sqlite3*
+*.db
+*.db-*
+*.pem
+*.key
+credential.dat
 *.bak
+backups/
+work/
+dist/
+docs/2026-09-21-studio-revision.md
+.pytest_cache/
+.ruff_cache/
+telegram_settings.json
+telegram_whitelist.json
+owner_token.secret
 
-# IDE & editor configurations
-.idea/
-.vscode/
-*.swp
-*.swo
 
-# Operating system files
-.DS_Store
-Thumbs.db

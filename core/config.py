@@ -27,7 +27,7 @@ class SystemSettings(BaseModel):
     inactivity_timeout_seconds: int = Field(default=1800, ge=10)
     heartbeat_interval_seconds: int = Field(default=15, ge=1)
     max_tool_rounds: int = Field(default=40, ge=1, le=200)
-    max_autonomous_turns: int = Field(default=100, ge=1, le=1000)
+    max_autonomous_turns: Optional[int] = Field(default=None)
     max_workers: int = Field(default=12, ge=1, le=100)
     request_timeout_seconds: int = Field(default=600, ge=1)
     max_output_tokens: int = Field(default=8192, ge=256)

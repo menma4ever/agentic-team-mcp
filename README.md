@@ -2,6 +2,7 @@
 
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
+[![Version](https://img.shields.io/badge/Release-v0.3.0-blue.svg)](https://github.com/menma4ever/agentic-team-mcp/releases)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
 [![Local-First](https://img.shields.io/badge/Architecture-Local--First-orange.svg)](#)
 [![Autonomous Multi-Agent](https://img.shields.io/badge/Agents-Autonomous_Multi--Agent-purple.svg)](#)
@@ -11,6 +12,23 @@
 *Live interactive Web Studio floor visualization showing Root Watchdog supervision, hierarchical reporting trees, and dynamic agent collaboration links. (See animated preview: [`assets/web_studio_preview.gif`](assets/web_studio_preview.gif))*
 
 > **Agentic Team MCP** is an enterprise-grade, local-first multi-agent orchestration platform designed around the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). It establishes a persistent, hierarchical agent workforce (**Root Watchdog Supervisor → CEO Strategy → Manager Execution → Specialist Workers**) that bridges native CLI coding environments (Claude Code, Gemini Antigravity, Codex) with unified direct API providers (DeepSeek, Z.ai/GLM, Google Gemini, OpenAI, and OpenRouter).
+
+---
+
+## 🌟 What's New in v0.3.0
+
+- 🔀 **Smart Flank Bezier Routing & Floor Clearance**:
+  - **Non-Intersecting Trajectories**: CEO-to-Worker communication conduits now calculate dynamic cubic Bezier flanking curves around Manager nodes, eliminating line occlusion.
+  - **Optimized Vertical Clearance**: Auto-arrange engine now spaces Manager at $y=295$ and Workers staggered at $y=580$, giving ample clearance for high-density multi-agent trees.
+  - **Directional Transmission Animations**: Real-time `.active-comm` conduits stream directional animated glowing pulse orbs indicating exact source-to-target payload transfer.
+- ⚡ **Two-Line Responsive KV Caching Telemetry**:
+  - Redesigned `.caching-chip` badges into two responsive tiers (`⚡ KV Cache` / `86.4% · 128k hit`), preventing truncation on mobile viewports and compact agent cards.
+- 🛡️ **Zero-Interference Multi-Account Quota Isolation**:
+  - Independent account error boundaries in `core/auth_pool.py`: rate limits or 429 quota exhaustion on an individual Google profile never block or contaminate other healthy accounts in the pool.
+  - **Instant Live Self-Healing**: Cooldown states are immediately revoked and restored to `HEALTHY` upon verified successful turn execution, with automated background cleanup for expired windows.
+- 📱 **Telegram Mobile Supervisor Hardening**:
+  - Telemetric desktop screenshot capture hardened against prompt swallowing during high-load periods.
+  - Persistent per-chat project session memory and live `/project` switching for autonomous remote orchestration.
 
 ---
 

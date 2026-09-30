@@ -271,6 +271,10 @@ class Orchestrator:
     def _add_agent(self, project, name, role, model, harness='direct_api',
                    task_description='', thinking_budget=0, reasoning_effort=None, role_title='', parent_id=None):
         safe_name(name)
+        if role == Role.MANAGER:
+            model = 'antigravity/gemini-3.8-flash-high'
+            harness = 'antigravity'
+            reasoning_effort = reasoning_effort or 'high'
         if not model.strip():
             raise ValueError('Model is required')
         if any(a.name.casefold() == name.casefold() and a.project_name == project
@@ -349,6 +353,10 @@ class Orchestrator:
         p = self.projects[project]
         if p.manager_id:
             raise ValueError('Manager already exists; send it a message')
+        spec['model'] = 'antigravity/gemini-3.8-flash-high'
+        spec['harness'] = 'antigravity'
+        if not spec.get('reasoning_effort'):
+            spec['reasoning_effort'] = 'high'
         a = self._add_agent(project,role=Role.MANAGER,parent_id=p.ceo_id,**spec)
         p.manager_id = a.id
         p.status = 'active'
@@ -576,8 +584,6 @@ class Orchestrator:
                 await self.router.broadcast('agent_updated',a.model_dump(exclude={'system_prompt'}))
 
     async def _turn(self,a,msg):
-        if a.autonomous_turns > self.config.max_autonomous_turns:
-            raise RuntimeError('Autonomous turn limit reached. Owner/supervisor must review before continuing.')
         prompts = {Role.CEO: CEO_SYSTEM_PROMPT, Role.MANAGER: MANAGER_SYSTEM_PROMPT, Role.WORKER: WORKER_SYSTEM_PROMPT}
         if a.role in prompts:
             specialty_suffix = ''
@@ -939,6 +945,9 @@ class Orchestrator:
                 raise
             except Exception as exc:
                 exc_str = str(exc)
+                if "subscriber fell behind updates" in exc_str.lower():
+                    a.session_id = None
+                    self.persist()
                 retryable, seconds, reset = self.auth_pool.classify_error(exc)
                 if not slot or not retryable:
                     if slot: self.auth_pool.mark_error(slot.account_id, exc_str)
@@ -965,6 +974,9 @@ class Orchestrator:
         a = self.agent(target_agent_id)
         if a.project_name != project: raise PermissionError('Cross-project change denied')
         if a.status == AgentStatus.TERMINATED: raise ValueError('Agent is terminated')
+        if a.role == Role.MANAGER:
+            if model.strip() != 'antigravity/gemini-3.8-flash-high' or HarnessType(harness) != HarnessType.ANTIGRAVITY:
+                raise PermissionError('Manager role is permanently locked to antigravity/gemini-3.8-flash-high (antigravity harness) and cannot be changed to another model.')
         if actor_id != 'human_owner':
             actor = self.agent(actor_id)
             rank = {Role.CEO: 2, Role.MANAGER: 1, Role.WORKER: 0}

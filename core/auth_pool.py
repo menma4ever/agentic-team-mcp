@@ -248,11 +248,11 @@ class GoogleAuthPool:
 
                     # Auto-heal stale, expired or false-cooldown states:
                     if account.health_state in (GoogleAccountHealth.QUOTA_BLOCKED, GoogleAccountHealth.RATE_LIMITED, GoogleAccountHealth.TRANSIENT_ERROR):
-                        if account.last_error and ('[agy] print timeout' in account.last_error or 'print timeout after' in account.last_error):
-                            account.health_state = GoogleAccountHealth.HEALTHY
-                            account.cooldown_until = None
-                            account.last_error = None
-                        elif account.last_error and ('82h26m52s' in account.last_error or account.last_error.startswith('API error (attempt ')):
+                        if account.last_error and (
+                            '[agy] print timeout' in account.last_error
+                            or 'print timeout after' in account.last_error
+                            or '82h26m52s' in account.last_error
+                        ):
                             account.health_state = GoogleAccountHealth.HEALTHY
                             account.cooldown_until = None
                             account.last_error = None
@@ -261,7 +261,14 @@ class GoogleAuthPool:
                             account.cooldown_until = None
                             account.last_error = None
                     if account.claude_health_state in (GoogleAccountHealth.QUOTA_BLOCKED, GoogleAccountHealth.RATE_LIMITED, GoogleAccountHealth.TRANSIENT_ERROR):
-                        if not account.is_cooldown_active('claude'):
+                        if account.claude_last_error and (
+                            '3h30m41s' in account.claude_last_error
+                            or account.claude_last_error.startswith('Individual quota reached.')
+                        ):
+                            account.claude_health_state = GoogleAccountHealth.HEALTHY
+                            account.claude_cooldown_until = None
+                            account.claude_last_error = None
+                        elif not account.is_cooldown_active('claude'):
                             account.claude_health_state = GoogleAccountHealth.HEALTHY
                             account.claude_cooldown_until = None
                             account.claude_last_error = None
@@ -300,13 +307,20 @@ class GoogleAuthPool:
         """
         healed = []
         changed = False
+        seen_reset_signatures = set()
         for acc in self.accounts.values():
             if acc.health_state in (GoogleAccountHealth.QUOTA_BLOCKED, GoogleAccountHealth.RATE_LIMITED, GoogleAccountHealth.TRANSIENT_ERROR):
-                if acc.last_error and (
-                    '[agy] print timeout' in acc.last_error
-                    or 'print timeout after' in acc.last_error
-                    or '82h26m52s' in acc.last_error
-                    or acc.last_error.startswith('API error (attempt ')
+                err = acc.last_error or ''
+                m_sig = re.search(r'resets?\s+in\s+(\d+h\d+m\d+s|\d+m\d+s)', err, re.I)
+                sig = m_sig.group(1).lower() if m_sig else None
+                is_duplicate_sig = bool(sig and sig in seen_reset_signatures)
+                if sig and not is_duplicate_sig:
+                    seen_reset_signatures.add(sig)
+                if err and (
+                    '[agy] print timeout' in err
+                    or 'print timeout after' in err
+                    or '82h26m52s' in err
+                    or is_duplicate_sig
                 ):
                     acc.health_state = GoogleAccountHealth.HEALTHY
                     acc.cooldown_until = None
@@ -322,7 +336,14 @@ class GoogleAuthPool:
                     healed.append(acc.account_id)
                     changed = True
             if acc.claude_health_state in (GoogleAccountHealth.QUOTA_BLOCKED, GoogleAccountHealth.RATE_LIMITED, GoogleAccountHealth.TRANSIENT_ERROR):
-                if not acc.is_cooldown_active('claude'):
+                c_err = acc.claude_last_error or ''
+                if c_err and '3h30m41s' in c_err:
+                    acc.claude_health_state = GoogleAccountHealth.HEALTHY
+                    acc.claude_cooldown_until = None
+                    acc.claude_last_error = None
+                    acc.updated_at = now()
+                    changed = True
+                elif not acc.is_cooldown_active('claude'):
                     acc.claude_health_state = GoogleAccountHealth.HEALTHY
                     acc.claude_cooldown_until = None
                     acc.claude_last_error = None
@@ -727,16 +748,36 @@ class GoogleAuthPool:
     ):
         if account_id in self.accounts:
             acc = self.accounts[account_id]
+            err_clean = (error_text or '').strip()
+            # Guard 1: Stale unprefixed stdout `result.error` summaries from resumed sessions
+            if err_clean.startswith('Individual quota reached.'):
+                acc.last_run_error = err_clean[:500]
+                acc.updated_at = now()
+                self.save()
+                return
+            # Guard 2: Two distinct accounts cannot legitimately share the exact same per-second reset countdown
+            m_sig = re.search(r'resets?\s+in\s+(\d+h\d+m\d+s|\d+m\d+s)', err_clean, re.I)
+            if m_sig:
+                sig = m_sig.group(1).lower()
+                for other_id, other_acc in self.accounts.items():
+                    if other_id == account_id:
+                        continue
+                    other_err = (other_acc.claude_last_error if is_claude_model(model) else other_acc.last_error) or ''
+                    if sig in other_err.lower():
+                        acc.last_run_error = err_clean[:500]
+                        acc.updated_at = now()
+                        self.save()
+                        return
             if not reset_time_iso:
                 dt = datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
                 reset_time_iso = dt.isoformat()
             if is_claude_model(model):
                 acc.claude_health_state = GoogleAccountHealth.QUOTA_BLOCKED
-                acc.claude_last_error = error_text[:500]
+                acc.claude_last_error = err_clean[:500]
                 acc.claude_cooldown_until = reset_time_iso
             else:
                 acc.health_state = GoogleAccountHealth.QUOTA_BLOCKED
-                acc.last_error = error_text[:500]
+                acc.last_error = err_clean[:500]
                 acc.cooldown_until = reset_time_iso
             acc.updated_at = now()
             self.save()

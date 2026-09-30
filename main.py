@@ -20,20 +20,26 @@ def serve(port):
     deadline = time.time() + 35
     while True:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        bound = False
         try:
-            try:
-                if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-                sock.bind(('127.0.0.1', port))
-            except (OSError, PermissionError):
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind(('127.0.0.1', port))
-            break
+            if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            sock.bind(('127.0.0.1', port))
+            bound = True
         except (OSError, PermissionError):
             sock.close()
-            if time.time() >= deadline:
-                raise
-            time.sleep(0.5)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(('127.0.0.1', port))
+                bound = True
+            except (OSError, PermissionError):
+                sock.close()
+        if bound:
+            break
+        if time.time() >= deadline:
+            raise OSError(f"Could not bind to 127.0.0.1:{port} within {int(deadline - time.time() + 35)}s")
+        time.sleep(0.5)
     sock.listen(128)
     instance=uuid.uuid4().hex
     DATA_DIR.mkdir(parents=True,exist_ok=True)

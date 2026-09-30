@@ -1205,18 +1205,19 @@ class TelegramBridge:
             elif is_file_cmd:
                 return f"⚠️ File not found matching query: <code>{query}</code>."
 
-        # Headless Background Screenshot & Visual Workspace Requests
+        # Headless Background Screenshot & Visual Workspace Requests (strictly for visual commands)
         screenshot_triggers = [
             "screenshot", "screen shot", "snapshot", "photo", "pic", "picture", "image",
             "/screenshot", "/photo", "/pic", "/image"
         ]
+        is_short_msg = len(text.split()) <= 15
         has_screenshot_kw = any(trig in lower_text for trig in screenshot_triggers)
-        has_send_intent = any(w in lower_text for w in ["send me", "show me", "send", "give me", "share", "snap", "take"])
-        has_visual_target = any(w in lower_text for w in ["team", "place", "floor", "workspace", "ceo", "astra", "working", "canvas", "tree"])
+        has_send_intent = any(phrase in lower_text for phrase in ["send me a screenshot", "show me the floor", "show the floor", "show me floor", "take a screenshot", "send screenshot", "snap the floor", "give me a screenshot"])
+        has_visual_target = any(w in lower_text for w in ["team floor", "workspace floor", "ceo drawer", "the floor", "canvas"])
 
-        if has_screenshot_kw or (has_send_intent and has_visual_target):
+        if is_short_msg and (has_screenshot_kw or (has_send_intent and has_visual_target)):
             self.send_chat_action(chat_id, "upload_photo")
-            proj = os.path.basename(self.project_dir)
+            proj = getattr(self, "_chat_project", {}).get(chat_id) or os.path.basename(self.project_dir)
 
             want_ceo = any(w in lower_text for w in ["ceo", "astra", "memo", "drawer", "decision"])
             want_both = any(w in lower_text for w in ["both", "all", "everything"]) or (want_ceo and any(w in lower_text for w in ["team", "floor", "place", "workspace"]))
@@ -1252,6 +1253,30 @@ class TelegramBridge:
             else:
                 return "⚠️ Unable to capture or dispatch background screenshot. Please ensure engine server is running on port 8765."
 
+        # Explicit Project Switching Command (/project <name> or /switch <name>)
+        if lower_text.startswith(("/project", "/switch")):
+            parts = text.strip().split(maxsplit=1)
+            if not hasattr(self, "_chat_project"):
+                self._chat_project = {}
+            if len(parts) > 1:
+                target = parts[1].strip().lower()
+                proj_root = Path(self.project_dir).parent
+                matched = None
+                if proj_root.is_dir():
+                    for p in proj_root.iterdir():
+                        if p.is_dir() and (target in p.name.lower()):
+                            matched = p.name
+                            break
+                if matched:
+                    self._chat_project[chat_id] = matched
+                    self.project_dir = str(proj_root / matched)
+                    return f"🔄 <b>Active Project Switched</b>\n\nNow targeting: <code>{matched}</code>"
+                else:
+                    return f"⚠️ Project matching <code>{target}</code> not found."
+            else:
+                curr = self._chat_project.get(chat_id) or os.path.basename(self.project_dir)
+                return f"📁 <b>Current Active Project</b>: <code>{curr}</code>\n\nUse <code>/project &lt;name&gt;</code> to switch (e.g. <code>/project bonsai</code> or <code>/project jobs</code>)."
+
         # Conversational Guidance / Queries / Trajectory Steering -> Root Watchdog AI Brain
         active_req_id = self.context_manager.get_active_request_id(chat_id)
         if active_req_id:
@@ -1270,12 +1295,31 @@ class TelegramBridge:
             from core.watchdog_brain import watchdog_brain
             lower_text = text.lower()
             detected_project = None
-            if any(k in lower_text for k in ["job search", "job finding", "jobs", "hiring", "vacancy", "vacancies"]):
-                detected_project = "Job searching"
-            elif any(k in lower_text for k in ["bonsai", "qwen", "ptq", "sde14", "sde16"]):
+
+            if not hasattr(self, "_chat_project"):
+                self._chat_project = {}
+
+            job_kws = ["job search", "job finding", "jobs", "hiring", "vacancy", "vacancies", "hh.uz", "hh", "campaign_manager", "resume"]
+            bonsai_kws = [
+                "bonsai", "qwen", "ptq", "sde", "ternary", "layer", "quant", "clean_teacher",
+                "assay", "j2", "int4", "manager_bonsai", "astra", "gemini 3.8", "probe", "wikitext",
+                "20300", "pid 20300", "diagnose"
+            ]
+            uzbek_kws = ["uzbek", "sft", "corpus"]
+
+            if any(k in lower_text for k in bonsai_kws):
                 detected_project = "Bonsai_Sauce_Qwen3.5-2B"
-            elif any(k in lower_text for k in ["uzbek", "sft"]):
+            elif any(k in lower_text for k in job_kws):
+                detected_project = "Job searching"
+            elif any(k in lower_text for k in uzbek_kws):
                 detected_project = "Uzbek_SFT_Corpus"
+
+            if detected_project:
+                self._chat_project[chat_id] = detected_project
+                proj_root = Path(self.project_dir).parent
+                cand_dir = proj_root / detected_project
+                if cand_dir.is_dir():
+                    self.project_dir = str(cand_dir)
 
             active_proj = None
             try:
@@ -1285,7 +1329,8 @@ class TelegramBridge:
             except Exception:
                 pass
 
-            project_name = detected_project or active_proj or os.path.basename(self.project_dir)
+            remembered_proj = self._chat_project.get(chat_id)
+            project_name = detected_project or remembered_proj or active_proj or os.path.basename(self.project_dir)
 
             # Send initial placeholder message for live progressive editing
             placeholder_id = self.send_telegram_message_get_id(

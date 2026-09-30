@@ -9,6 +9,7 @@ import sys
 import uuid
 import psutil
 from pathlib import Path
+from typing import Optional
 from core.config import ROOT, settings
 from core.workspace import contained
 from engine.models import HarnessType
@@ -420,6 +421,19 @@ class CLIRunner:
         completed_response = False
         current_error_step = False
         stale_quota = False
+        native_quota_error = None
+        result_quota_error = None
+        log_path = None
+
+        def _extract_native_quota(text_line: str) -> Optional[str]:
+            failure = re.search(r'(?:run\.go:\d+\] Run: attempt \d+ failed \(|errorreport\.go:\d+\] (?:agent executor error: )?(?:generating and executing: )?)(.*)', text_line)
+            if failure:
+                detail = failure.group(1)
+                if re.search(r'individual quota (?:reached|exhausted)|quota exceeded|resource_exhausted', detail, re.I):
+                    detail = re.sub(r'\), retrying in .*$', '', detail)
+                    return self.config.redact(detail)
+            return None
+
         if agent.harness == HarnessType.ANTIGRAVITY:
             # A unique file prevents an old run's quota error from triggering a new failover.
             log_dir = Path(auth_dir) if auth_dir else Path(working_dir) / '.agents'
@@ -429,7 +443,7 @@ class CLIRunner:
             argv += ['--log-file', str(log_path)]
 
             async def watch_google(proc):
-                nonlocal verified
+                nonlocal verified, native_quota_error
                 offset = 0
                 pending = b''
                 while True:
@@ -459,15 +473,13 @@ class CLIRunner:
                                     launched_event.set()
                                 await emit('auth_verified', {'account_id': google_account['account_id'],
                                     'source': 'native_cli_login'})
-                        # Read the CLI's own error record, never arbitrary prompt/tool text.
-                        failure = re.search(r'(?:run\.go:\d+\] Run: attempt \d+ failed \(|errorreport\.go:\d+\] (?:agent executor error: )?(?:generating and executing: )?)(.*)', line)
-                        if failure:
-                            detail = failure.group(1)
-                            if re.search(r'individual quota (?:reached|exhausted)|quota exceeded', detail, re.I):
-                                detail = re.sub(r'\), retrying in .*$', '', detail)
-                                await emit('auth_quota_detected', {'account_id': google_account['account_id'] if google_account else None,
-                                    'source': 'native_cli_retry'})
-                                raise RuntimeError(self.config.redact(detail))
+                        # Read the CLI's own error record from this run's isolated log file, never historical transcript state.
+                        q_err = _extract_native_quota(line)
+                        if q_err:
+                            native_quota_error = q_err
+                            await emit('auth_quota_detected', {'account_id': google_account['account_id'] if google_account else None,
+                                'source': 'native_cli_retry'})
+                            raise RuntimeError(q_err)
                     if finished and not chunk:
                         break
                     await asyncio.sleep(.2)
@@ -477,7 +489,7 @@ class CLIRunner:
         turn_cache_tokens = 0
         has_step_usage = False
         def parse(line):
-            nonlocal completed_response, current_error_step, stale_quota, turn_input_tokens, turn_output_tokens, turn_cache_tokens, has_step_usage
+            nonlocal completed_response, current_error_step, stale_quota, result_quota_error, turn_input_tokens, turn_output_tokens, turn_cache_tokens, has_step_usage
             try: event=json.loads(line)
             except ValueError: return
             if not isinstance(event,dict): return
@@ -506,15 +518,18 @@ class CLIRunner:
                         agent.last_turn_usage = payload['usage']
                     if payload.get('status') != 'SUCCESS':
                         error = str(payload.get('error') or 'Antigravity ended with '+str(payload.get('status')))
+                        is_quota_text = bool(re.search(r'individual quota (?:reached|exhausted)|quota exceeded|resource_exhausted', error, re.I))
                         # AGY permanently carries any historical turn's error in a resumed
-                        # conversation's cumulative `result` summary despite new completed turns.
-                        # Accept the completed response whenever this invocation produced a
-                        # fresh completed response with no error step in this run. The log
-                        # monitor independently catches any real native quota failure.
+                        # conversation's cumulative `result` summary even when a new turn succeeds
+                        # OR when a resumed turn fails early for a non-quota reason (e.g. stream stall
+                        # "subscriber fell behind updates"). Never trust a quota string in `result.error`
+                        # unless the isolated per-run `--log-file` recorded a real quota failure!
                         if (completed_response and not current_error_step
                                 and isinstance(payload.get('response'), str) and payload['response']):
                             stale_quota = True
                             final.append(payload['response'])
+                        elif is_quota_text:
+                            result_quota_error = error
                         else:
                             errors.append(error)
                     elif isinstance(payload.get('response'),str):
@@ -535,23 +550,49 @@ class CLIRunner:
         async def on_event(kind,data):
             if kind=='process_started': agent.pid=data['pid']
             await emit(kind,data)
+
+        def _finalize_google_log_scan():
+            nonlocal native_quota_error
+            if not native_quota_error and log_path and log_path.is_file():
+                try:
+                    for raw_line in log_path.read_text(encoding='utf-8', errors='replace').splitlines():
+                        q_err = _extract_native_quota(raw_line)
+                        if q_err:
+                            native_quota_error = q_err
+                            break
+                except Exception:
+                    pass
+
         try:
             await self._process(agent.id,argv,working_dir,on_event,env,prompt,
                                 None if agent.harness == HarnessType.CLAUDE_CODE else self.config.request_timeout_seconds,parse,
                                 monitor=monitor,launched_event=launched_event)
         except RuntimeError as exc:
-            if "no rollout found" in str(exc):
+            _finalize_google_log_scan()
+            exc_lower = str(exc).lower()
+            if "no rollout found" in exc_lower or "subscriber fell behind updates" in exc_lower:
                 agent.session_id = None
-            # Preserve structured provider errors; an output tail can omit the quota/reset.
+            if native_quota_error:
+                raise RuntimeError(native_quota_error) from exc
+            if result_quota_error and not native_quota_error:
+                await emit('auth_stale_quota_ignored', {'session_id': agent.session_id,
+                    'reason': 'Historical session result.error quota ignored because isolated run log had no quota failure'})
             if errors:
                 raise RuntimeError('; '.join(errors)) from exc
             raise
+        _finalize_google_log_scan()
+        if native_quota_error:
+            raise RuntimeError(native_quota_error)
+        if result_quota_error and not native_quota_error:
+            stale_quota = True
+            if not final:
+                agent.session_id = None
         if errors: raise RuntimeError('; '.join(errors))
         if google_account and not verified:
             raise RuntimeError('Google CLI finished without confirming the selected login identity')
         if stale_quota:
             await emit('auth_stale_quota_ignored', {'session_id': agent.session_id,
-                'reason': 'Previous quota error repeated alongside a new completed response'})
+                'reason': 'Previous quota error repeated in session summary without live native quota failure'})
         if not final: raise RuntimeError('CLI returned no final message; inspect streamed session events')
         return '\n'.join(final)
 
