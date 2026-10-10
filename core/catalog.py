@@ -121,14 +121,14 @@ def model_catalog(engine):
     # 6. Partner APIs (DeepSeek, OpenRouter, SiliconFlow, Together)
     for p_id, p_label in [('deepseek', 'DeepSeek API'), ('openrouter', 'DeepSeek via OpenRouter'),
                           ('siliconflow', 'DeepSeek via SiliconFlow'), ('together', 'DeepSeek via Together')]:
+        has_key = bool(config and config.get_api_key(p_id))
         p_models = []
         if config and hasattr(config, 'providers') and p_id in config.providers:
             for m in config.providers[p_id].models:
                 p_models.append({'id': f'{p_id}/{m}', 'recommended_harness': 'direct_api', 'source': p_label})
-        elif p_id in PROVIDER_PRESETS:
+        elif (has_key or p_id == 'deepseek') and p_id in PROVIDER_PRESETS:
             for m in PROVIDER_PRESETS[p_id].get('models', []):
                 p_models.append({'id': f'{p_id}/{m}', 'recommended_harness': 'direct_api', 'source': p_label})
-        has_key = bool(config and config.get_api_key(p_id))
         providers_list.append({
             'id': p_id,
             'label': p_label,

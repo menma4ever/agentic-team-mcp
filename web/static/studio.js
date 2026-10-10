@@ -950,16 +950,13 @@ async function renderAuthPool(){
       const tdActions=el('td',undefined,'auth-actions-cell');
       const isPending=data.login_pending===acc.account_id;
 
-      if(!acc.credential_saved || isPending){
-        const btnLogin=el('button','Sign in','secondary text-button auth-action-btn');
-        btnLogin.title='Open terminal window to sign in to this Google account';
-        btnLogin.onclick=guard(async()=>{const r=await api(`/api/auth/google/accounts/${acc.account_id}/login`,{});notice(r.note||'Sign-in opened.','success');await renderAuthPool();});
+      const btnLogin=el('button','Sign in','secondary text-button auth-action-btn');
+      btnLogin.title='Open terminal window to sign in to this Google account';
+      btnLogin.onclick=guard(async()=>{const r=await api(`/api/auth/google/accounts/${acc.account_id}/login`,{});notice(r.note||'Sign-in opened.','success');await renderAuthPool();});
 
-        const btnCapture=el('button',isPending?'Capture login 📥':'Capture login','secondary text-button auth-action-btn'+(isPending?' btn-highlight':''));
-        btnCapture.title=isPending?'Action required: click to save completed credential from terminal':'Save credential from completed terminal sign-in to this slot';
-        btnCapture.onclick=guard(async()=>{const r=await api(`/api/auth/google/accounts/${acc.account_id}/capture`,{});notice(r.note||`Captured credentials for ${acc.account_id}`,'success');await renderAuthPool();});
-        tdActions.append(btnLogin,btnCapture);
-      }
+      const btnCapture=el('button',isPending?'Capture login 📥':'Capture login','secondary text-button auth-action-btn'+(isPending?' btn-highlight':''));
+      btnCapture.title=isPending?'Action required: click to save completed credential from terminal':'Save credential from completed terminal sign-in to this slot';
+      btnCapture.onclick=guard(async()=>{const r=await api(`/api/auth/google/accounts/${acc.account_id}/capture`,{});notice(r.note||`Captured credentials for ${acc.account_id}`,'success');await renderAuthPool();});
 
       const btnTest=el('button','Check setup','secondary text-button auth-action-btn');
       btnTest.title='Verify configuration and execute a live ping to Google Antigravity';
@@ -987,7 +984,7 @@ async function renderAuthPool(){
       btnDel.title='Permanently remove this account profile';
       btnDel.onclick=guard(async()=>{if(!confirm(`Delete profile for ${acc.email} (${acc.account_id})?`))return;await api(`/api/auth/google/accounts/${acc.account_id}`,undefined,'DELETE');notice(`Deleted account ${acc.account_id}.`,'success');await renderAuthPool();});
 
-      tdActions.append(btnTest,btnToggle,btnDel);
+      tdActions.append(btnLogin,btnCapture,btnTest,btnToggle,btnDel);
       tr.append(tdAcc,tdState,td5h,tdW,tdAgents,tdActions);
       tbody.append(tr);
     }
@@ -995,7 +992,7 @@ async function renderAuthPool(){
 
   renderPoolTier('auth-metrics','auth-rows',false);
   renderPoolTier('claude-auth-metrics','claude-auth-rows',true);
-  updateCooldownTickers();
+  if(typeof updateCooldownTickers==='function')updateCooldownTickers();
  }catch(err){if($('auth-health'))$('auth-health').textContent='Auth pool unavailable: '+err.message;}
 }
 window.refreshAuthPool=renderAuthPool;

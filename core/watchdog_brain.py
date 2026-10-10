@@ -1287,7 +1287,8 @@ class WatchdogBrain:
             f"4. Remind the owner that once they confirm these parameters, you can immediately launch the project with their chosen CEO and Manager models."
         )
 
-        resp, _ = self._call_agy_cli(probe_prompt)
+        cli_res = self._call_agy_cli(probe_prompt)
+        resp = cli_res[0] if isinstance(cli_res, tuple) else cli_res
         if not resp:
             resp = self._call_direct_api([{"role": "user", "content": probe_prompt}])
         return resp
@@ -1829,6 +1830,23 @@ Your Full Antigravity CLI & MCP Powers:
             if executed_optimize_note:
                 return executed_optimize_note, None
 
+        # 7b. Usage Telemetry, Dormancy Inquiry, Project Domain Probing, and Worker Roster Table
+        usage_reply = self.handle_usage_query(user_text, state)
+        if usage_reply:
+            return usage_reply, None
+
+        dormancy_reply = self.handle_dormancy_and_sleep_inquiry(user_text, state)
+        if dormancy_reply:
+            return dormancy_reply, None
+
+        probe_reply = self.handle_project_probing(user_text, state)
+        if probe_reply:
+            return probe_reply, None
+
+        if any(p in lower for p in ["table of workers", "workers table", "worker table", "show workers table"]):
+            table_str = self.format_workers_table(state.get("workers", []))
+            return f"🛡️ *Root Watchdog — Worker Roster*\n\n```\n{table_str}\n```", None
+
         # 8. Full Antigravity CLI Agent Turn
         system_prompt = self._build_system_prompt(state)
         if executed_directive_note:
@@ -1849,12 +1867,13 @@ Your Full Antigravity CLI & MCP Powers:
         conv_id = self.get_conversation_id(chat_id)
 
         # Primary: Unrestricted Antigravity CLI Agent (agy) with live streaming
-        raw_output, new_conv_id = self._call_agy_cli(
+        cli_res = self._call_agy_cli(
             full_cli_prompt,
             conversation_id=conv_id,
             on_progress=on_progress,
             timeout=50
         )
+        raw_output, new_conv_id = cli_res if isinstance(cli_res, tuple) else (cli_res, None)
         if new_conv_id:
             self.save_conversation_id(chat_id, new_conv_id)
 
@@ -1992,7 +2011,30 @@ Your Full Antigravity CLI & MCP Powers:
             ceo_obj = state.get("ceo") or {}
             mgr_obj = state.get("manager") or {}
 
-            # Primary Engine: Local Whisper (or API fallback) via transcribe_audio (100% offline, 1-2s response)
+            # Primary Engine: Native Gemini 3.8 Flash via agy CLI
+            prompt = (
+                f"You are Root Watchdog, supervisory liaison for Agentic Team MCP.\n"
+                f"The Human Owner sent an audio voice message located at '{audio_abs}'.\n"
+                f"Active Project: {state.get('active_project', 'None')}\n"
+                f"CEO: {ceo_obj.get('name', 'None')} ({ceo_obj.get('status', 'unknown')})\n"
+                f"Manager: {mgr_obj.get('name', 'None')} ({mgr_obj.get('status', 'unknown')})\n\n"
+                f"INSTRUCTIONS:\n"
+                f"1. Transcribe the user's audio request.\n"
+                f"2. Answer the user's spoken request or command directly."
+            )
+            cli_res = self._call_agy_cli(prompt, timeout=20)
+            raw_output = cli_res[0] if isinstance(cli_res, tuple) else cli_res
+            if raw_output:
+                m_act = re.search(r"\[ACTION:RESUME_AGENT:([^\]]+)\]", raw_output, re.IGNORECASE)
+                if m_act:
+                    target_role = m_act.group(1).strip().lower()
+                    raw_output = raw_output[:m_act.start()].strip()
+                    res_note = self.handle_resume_agent(state, target_role)
+                    if res_note:
+                        raw_output = f"{raw_output}\n\n{res_note}"
+                return raw_output, None
+
+            # Secondary Engine Fallback: Local Whisper (or API fallback) via transcribe_audio
             transcript = transcribe_audio(audio_target, mime_type=mime_type or "audio/ogg")
             if transcript:
                 logger.info(f"Transcribed audio: {transcript}")
@@ -2006,21 +2048,6 @@ Your Full Antigravity CLI & MCP Powers:
                 )
                 formatted = f"🎙️ *Voice Note Transcribed*: \"_{transcript}_\"\n\n{reply}"
                 return formatted, dispatch
-
-            # Secondary Engine Fallback: Gemini 3.8 Flash via agy CLI
-            prompt = (
-                f"You are Root Watchdog, supervisory liaison for Agentic Team MCP.\n"
-                f"The Human Owner sent an audio voice message located at '{audio_abs}'.\n"
-                f"Active Project: {state.get('active_project', 'None')}\n"
-                f"CEO: {ceo_obj.get('name', 'None')} ({ceo_obj.get('status', 'unknown')})\n"
-                f"Manager: {mgr_obj.get('name', 'None')} ({mgr_obj.get('status', 'unknown')})\n\n"
-                f"INSTRUCTIONS:\n"
-                f"1. Transcribe the user's audio request.\n"
-                f"2. Answer the user's spoken request or command directly."
-            )
-            raw_output, _ = self._call_agy_cli(prompt, timeout=20)
-            if raw_output:
-                return raw_output, None
 
             if caption:
                 reply, dispatch = self.generate_response(
@@ -2038,7 +2065,9 @@ Your Full Antigravity CLI & MCP Powers:
             else:
                 return (
                     f"🎙️ *Voice Note Received & Saved*: `{file_path.name}` ({file_size} bytes)\n\n"
-                    f"Audio saved to `{audio_abs}`. Processing telemetry."
+                    f"Audio saved to `{audio_abs}`. Processing telemetry.\n\n"
+                    f"💡 _To enable voice transcription fallback, register your key:_\n"
+                    f"`add api key for gemini: <YOUR_KEY>`"
                 ), None
 
         # 2. Photos & Images
@@ -2059,7 +2088,8 @@ Your Full Antigravity CLI & MCP Powers:
                 f"3. Directly answer the user's caption/question (if any) or provide a concise, high-value technical analysis for our project pipeline.\n"
                 f"4. Format your output cleanly for Telegram (*bold*, `code`, bullet points)."
             )
-            raw_output, _ = self._call_agy_cli(prompt, timeout=40)
+            cli_res = self._call_agy_cli(prompt, timeout=40)
+            raw_output = cli_res[0] if isinstance(cli_res, tuple) else cli_res
             if raw_output:
                 return raw_output, None
 
@@ -2119,7 +2149,8 @@ Your Full Antigravity CLI & MCP Powers:
                 f"2. Describe what happens in the video clip, extracting any relevant text or visual actions.\n"
                 f"3. Directly address the user's caption or question."
             )
-            raw_output, _ = self._call_agy_cli(prompt, timeout=45)
+            cli_res = self._call_agy_cli(prompt, timeout=45)
+            raw_output = cli_res[0] if isinstance(cli_res, tuple) else cli_res
             if raw_output:
                 return raw_output, None
 
@@ -2186,7 +2217,8 @@ Your Full Antigravity CLI & MCP Powers:
                     f"Caption: {caption if caption else 'None'}\n\n"
                     f"Please use your `view_file` tool on '{doc_abs}' to read the PDF and summarize or answer the user's inquiry."
                 )
-                raw_output, _ = self._call_agy_cli(prompt, timeout=40)
+                cli_res = self._call_agy_cli(prompt, timeout=40)
+                raw_output = cli_res[0] if isinstance(cli_res, tuple) else cli_res
                 if raw_output:
                     return raw_output, None
 

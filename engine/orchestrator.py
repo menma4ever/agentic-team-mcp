@@ -8,9 +8,12 @@ import secrets
 import uuid
 import zipfile
 import psutil
+import re
+import socket
+import time
 from typing import Optional, List, Dict, Any, Set, Tuple
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from core.config import DATA_DIR, settings
 from core.workspace import WorkspaceManager, contained, safe_name
 from core.prompts import CEO_SYSTEM_PROMPT, MANAGER_SYSTEM_PROMPT, WORKER_SYSTEM_PROMPT
@@ -46,6 +49,8 @@ class Orchestrator:
         self.closing = False
         self.endpoint = ''
         self._quota_watchdog_task = None
+        self._network_watchdog_task = None
+        self._is_online = True
         saved = self.store.load()
         self.projects = {k: ProjectState(**v) for k,v in saved.get('projects', {}).items()}
         self.agents = {k: AgentNode(**v) for k,v in saved.get('agents', {}).items()}
@@ -137,11 +142,15 @@ class Orchestrator:
                 self.schedule(aid)
         if not self._quota_watchdog_task or self._quota_watchdog_task.done():
             self._quota_watchdog_task = asyncio.create_task(self._quota_watchdog_loop())
+        if not self._network_watchdog_task or self._network_watchdog_task.done():
+            self._network_watchdog_task = asyncio.create_task(self._network_watchdog_loop())
 
     async def close(self):
         self.closing = True
         if self._quota_watchdog_task and not self._quota_watchdog_task.done():
             self._quota_watchdog_task.cancel()
+        if self._network_watchdog_task and not self._network_watchdog_task.done():
+            self._network_watchdog_task.cancel()
         for task in list(self.active.values()):
             task.cancel()
         await asyncio.gather(*list(self.pumps.values()), return_exceptions=True)
@@ -156,48 +165,124 @@ class Orchestrator:
             'message': message
         }, actor_id='system')
 
+    @staticmethod
+    def _is_quota_cooldown_expired(error_str: str) -> bool:
+        """Parses error strings for cooldown expiry times (e.g. 'try again at 5:24 PM')."""
+        if not error_str:
+            return False
+        m = re.search(r'try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM|am|pm)?)', error_str, re.I)
+        if not m:
+            return False
+        time_str = m.group(1).strip().upper()
+        now_dt = datetime.now()
+        try:
+            t = datetime.strptime(time_str, '%I:%M %p').time()
+        except ValueError:
+            return False
+        reset_dt = datetime.combine(now_dt.date(), t)
+        if reset_dt < now_dt - timedelta(hours=1):
+            reset_dt += timedelta(days=1)
+        return now_dt >= reset_dt
+
     async def _quota_watchdog_loop(self):
-        """Monitors Google account cooldowns, heals expired accounts,
-        and automatically resumes agents that were paused waiting for Google quota.
+        """Monitors Google account cooldowns, external model quota expiry times,
+        and automatically resumes agents whose quota windows have reset.
         """
         while not self.closing:
             try:
                 await asyncio.sleep(10)
-                if not getattr(self, 'auth_pool', None) or not self.auth_pool.accounts:
-                    continue
 
-                # 1. Transition expired cooldowns to HEALTHY
-                healed = self.auth_pool.heal_expired_cooldowns()
-                if healed:
-                    logger.info(f"Google accounts {healed} cooldown expired; restored to HEALTHY")
-
-                # 2. Check for available Google capacity (up to max_concurrent per account)
-                has_capacity = any(
-                    acc.health_state == GoogleAccountHealth.HEALTHY
-                    and not acc.is_cooldown_active()
-                    and acc.active_agents < acc.max_concurrent
-                    for acc in self.auth_pool.accounts.values()
-                )
-                if not has_capacity:
-                    continue
-
-                # 3. Find paused agents waiting for Google quota / accounts
+                # 1. External provider quota reset timers (e.g. OpenAI Codex 'try again at 5:24 PM')
                 for aid, a in list(self.agents.items()):
-                    if a.status == AgentStatus.PAUSED and a.last_error and (
-                        'google accounts available' in a.last_error.lower()
-                        or 'quota' in a.last_error.lower()
-                        or 'auth_blocked' in a.last_error.lower()
-                    ):
-                        try:
-                            logger.info(f"Auto-resuming agent {a.name} ({aid}): healthy Google account available in pool")
-                            await self.resume_agent(aid, 'Resumed automatically after Google account quota cooldown expired or slot became available.')
-                            await self.router.broadcast('agent_updated', a.model_dump(exclude={'system_prompt'}))
-                        except Exception as exc:
-                            logger.warning(f"Failed to auto-resume {a.name}: {exc}")
+                    if a.status in (AgentStatus.FAILED, AgentStatus.PAUSED) and a.last_error:
+                        if self._is_quota_cooldown_expired(a.last_error):
+                            try:
+                                logger.info(f"[Watchdog] Quota cooldown expired for {a.name} ({aid}): auto-resuming on exact model '{a.model}'...")
+                                a.status = AgentStatus.IDLE
+                                a.last_error = None
+                                self._write_status(a)
+                                self.persist()
+                                await self.resume_agent(aid, 'Resumed automatically after usage limit cooldown expired.')
+                                await self.router.broadcast('agent_updated', a.model_dump(exclude={'system_prompt'}))
+                            except Exception as exc:
+                                logger.warning(f"Failed to auto-resume {a.name} after quota cooldown: {exc}")
+
+                # 2. Google Auth Pool checks
+                if getattr(self, 'auth_pool', None) and self.auth_pool.accounts:
+                    healed = self.auth_pool.heal_expired_cooldowns()
+                    if healed:
+                        logger.info(f"Google accounts {healed} cooldown expired; restored to HEALTHY")
+
+                    has_capacity = any(
+                        acc.health_state == GoogleAccountHealth.HEALTHY
+                        and not acc.is_cooldown_active()
+                        and acc.active_agents < acc.max_concurrent
+                        for acc in self.auth_pool.accounts.values()
+                    )
+                    if has_capacity:
+                        for aid, a in list(self.agents.items()):
+                            if a.status == AgentStatus.PAUSED and a.last_error and (
+                                'google accounts available' in a.last_error.lower()
+                                or 'quota' in a.last_error.lower()
+                                or 'auth_blocked' in a.last_error.lower()
+                            ):
+                                try:
+                                    logger.info(f"Auto-resuming agent {a.name} ({aid}): healthy Google account available in pool")
+                                    await self.resume_agent(aid, 'Resumed automatically after Google account quota cooldown expired or slot became available.')
+                                    await self.router.broadcast('agent_updated', a.model_dump(exclude={'system_prompt'}))
+                                except Exception as exc:
+                                    logger.warning(f"Failed to auto-resume {a.name}: {exc}")
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.warning(f"Error in quota watchdog loop: {exc}")
+
+    @staticmethod
+    def _is_internet_available(timeout: float = 2.0) -> bool:
+        """Fast TCP probe to verify genuine external internet connectivity."""
+        probes = [("1.1.1.1", 53), ("8.8.8.8", 53), ("208.67.222.222", 53)]
+        for host, port in probes:
+            try:
+                with socket.create_connection((host, port), timeout=timeout):
+                    return True
+            except (OSError, socket.timeout):
+                continue
+        return False
+
+    async def _network_watchdog_loop(self):
+        """Monitors internet connectivity in real-time.
+        When internet drops, marks offline state.
+        When internet reconnects, automatically heals and resumes all stalled,
+        disconnected, or failed agents across all active projects without human intervention.
+        """
+        while not self.closing:
+            try:
+                await asyncio.sleep(5)
+                online = await asyncio.to_thread(self._is_internet_available, 2.0)
+                if not online:
+                    if self._is_online:
+                        self._is_online = False
+                        logger.warning("[Watchdog] ⚠️ Internet connection lost! Network watchdog standing by to auto-resume upon reconnection.")
+                        await self.router.broadcast('network_status', {'status': 'offline', 'timestamp': time.time()})
+                    continue
+
+                if not self._is_online:
+                    self._is_online = True
+                    logger.info("[Watchdog] 🌐 Internet connectivity restored! Running Watchdog Fleet Optimizer to auto-resume agents...")
+                    await self.router.broadcast('network_status', {'status': 'online', 'timestamp': time.time()})
+                    for proj_name in list(self.projects.keys()):
+                        try:
+                            res = await self.action(proj_name, 'optimize_fleet', {}, actor_id='system_root_watchdog')
+                            healed = res.get('healed_count', 0)
+                            if healed > 0:
+                                logger.info(f"[Watchdog] 🌐 Project '{proj_name}': Auto-healed and resumed {healed} agent(s) after network reconnect.")
+                        except Exception as e:
+                            logger.warning(f"[Watchdog] Fleet optimization on reconnect for '{proj_name}' failed: {e}")
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(f"Error in network watchdog loop: {exc}")
+                await asyncio.sleep(5)
 
     def get_watchdog(self, project=None):
         from core.telegram_supervisor import telegram_supervisor
@@ -213,7 +298,7 @@ class Orchestrator:
             project_name=proj_key,
             name='Root_Watchdog',
             role=Role.WATCHDOG,
-            model='antigravity/gemini-3.8-flash-high',
+            model='antigravity/gemini-3.8-flash',
             harness=HarnessType.ANTIGRAVITY,
             thinking_budget=0,
             reasoning_effort='high',
@@ -271,9 +356,8 @@ class Orchestrator:
     def _add_agent(self, project, name, role, model, harness='direct_api',
                    task_description='', thinking_budget=0, reasoning_effort=None, role_title='', parent_id=None):
         safe_name(name)
-        if role == Role.MANAGER:
+        if role == Role.MANAGER and harness == 'antigravity':
             model = 'antigravity/gemini-3.8-flash-high'
-            harness = 'antigravity'
             reasoning_effort = reasoning_effort or 'high'
         if not model.strip():
             raise ValueError('Model is required')
@@ -353,9 +437,15 @@ class Orchestrator:
         p = self.projects[project]
         if p.manager_id:
             raise ValueError('Manager already exists; send it a message')
-        spec['model'] = 'antigravity/gemini-3.8-flash-high'
-        spec['harness'] = 'antigravity'
-        if not spec.get('reasoning_effort'):
+        if not spec.get('model'):
+            if p.allow_commands:
+                spec['model'] = 'antigravity/gemini-3.8-flash-high'
+                spec.setdefault('harness', 'antigravity')
+            else:
+                spec['model'] = self.config.default_manager_model
+        elif spec.get('model', '').startswith('antigravity/') and not spec.get('harness') and p.allow_commands:
+            spec['harness'] = 'antigravity'
+        if spec.get('harness') == 'antigravity' and not spec.get('reasoning_effort'):
             spec['reasoning_effort'] = 'high'
         a = self._add_agent(project,role=Role.MANAGER,parent_id=p.ceo_id,**spec)
         p.manager_id = a.id
@@ -375,9 +465,12 @@ class Orchestrator:
         if len(live) >= self.config.max_workers:
             raise ValueError('Worker limit reached')
         if not spec.get('model'):
-            spec['model'] = 'antigravity/gemini-3.8-flash-high'
-            spec['harness'] = 'antigravity'
-        elif spec.get('model') in ('antigravity/gemini-3.8-flash-high', 'antigravity/claude-opus-4-6-thinking') and not spec.get('harness'):
+            if p.allow_commands:
+                spec['model'] = 'antigravity/gemini-3.8-flash-high'
+                spec.setdefault('harness', 'antigravity')
+            else:
+                spec['model'] = self.config.default_worker_model
+        elif spec.get('model') in ('antigravity/gemini-3.8-flash-high', 'antigravity/claude-opus-4-6-thinking') and not spec.get('harness') and p.allow_commands:
             spec['harness'] = 'antigravity'
         a = self._add_agent(project,role=Role.WORKER,parent_id=parent_id,**spec)
         p.worker_ids.append(a.id)
@@ -565,17 +658,13 @@ class Orchestrator:
                 a.status = AgentStatus.PAUSED
                 a.last_error = str(exc)
                 await self.emit(a,'auth_blocked',{'error':a.last_error})
-                heal_res = await self.auto_diagnose_and_heal_agent(a.id, retry_turn=True)
-                if not heal_res.get('healed'):
-                    await self._parent_notice(a, f'{a.name} paused: {a.last_error}', kind='escalation')
+                await self._parent_notice(a, f'{a.name} paused: {a.last_error}', kind='escalation')
                 break
             except Exception as exc:
                 a.status = AgentStatus.FAILED
                 a.last_error = self.config.redact(exc)
                 await self.emit(a,'error',{'error':a.last_error})
-                heal_res = await self.auto_diagnose_and_heal_agent(a.id, retry_turn=True)
-                if not heal_res.get('healed'):
-                    await self._parent_notice(a,f'Execution failed for {a.name}: {a.last_error}',kind='escalation')
+                await self._parent_notice(a,f'Execution failed for {a.name}: {a.last_error}',kind='escalation')
             finally:
                 self.active.pop(aid,None)
                 self.inflight.pop(aid,None)
@@ -663,8 +752,8 @@ class Orchestrator:
                     'harnesses':self.cli.capabilities(),'command_execution':p.allow_commands,
                     'google_auth_pool':self.auth_pool.public(include_identity=actor is None),
                     'model_routing_guidance':{
-                        'primary_workhorse': 'antigravity/gemini-3.8-flash-high (primary powerhouse; strongest model; default for manager and critical workers)',
-                        'free_extra_workers': 'antigravity/claude-opus-4-6-thinking (independent 5-hour rolling quota bucket per Google account; Claude 4.6 Opus via Google Auth Pool)',
+                        'primary_workhorse': 'antigravity/gemini-3.8-flash-high (Supreme powerhouse; far stronger than Opus 4.6; mandatory for manager and all complex engineering, mathematics, driver code, and calibration)',
+                        'cheap_auxiliary_workers': 'antigravity/claude-opus-4-6-thinking (Cheapest auxiliary worker; only for simple text/formatting chores; NEVER for complex things when Gemini 3.8 Flash is available)',
                         'external_models_policy': 'ALL other external models (zai/* GLM, deepseek/*, direct anthropic/*, openai/* GPT/Codex) REQUIRE explicit Human Owner permission before use.'
                     }}
         if name in ('create_manager','spawn_worker'):
@@ -774,8 +863,6 @@ class Orchestrator:
                           'reviewed_by':a.id,'timestamp':now()}
             p.status='completed'
             self.decisions[a.id]='completed'
-            if a.role == Role.MANAGER and p.ceo_id:
-                await self._parent_notice(a, f"Project completed by Manager:\nSummary: {args['summary']}\nArtifacts: {args['artifacts']}")
             self.persist()
             return {'turn_complete':True,'summary':args['summary']}
         if name=='reconfigure_agent':
@@ -988,7 +1075,7 @@ class Orchestrator:
         a = self.agent(target_agent_id)
         if a.project_name != project: raise PermissionError('Cross-project change denied')
         if a.status == AgentStatus.TERMINATED: raise ValueError('Agent is terminated')
-        if a.role == Role.MANAGER:
+        if a.role == Role.MANAGER and a.harness == HarnessType.ANTIGRAVITY:
             if model.strip() != 'antigravity/gemini-3.8-flash-high' or HarnessType(harness) != HarnessType.ANTIGRAVITY:
                 raise PermissionError('Manager role is permanently locked to antigravity/gemini-3.8-flash-high (antigravity harness) and cannot be changed to another model.')
         if actor_id != 'human_owner':
@@ -1158,6 +1245,21 @@ class Orchestrator:
             a.status = AgentStatus.IDLE
             action_taken = f"Normalized reasoning effort flag for exact model '{model}'; auto-resumed."
 
+        # 6. Network Disconnect / Routing Discovery Failed / Connection Lost / Broken Socket
+        elif any(k in err for k in (
+            'workspace routing discovery failed', 'reconnecting', 'connection lost',
+            'failed to connect', 'connection reset', 'connection refused', 'econnreset',
+            'socket', 'getaddrinfo failed', 'network', 'authentication failed or timed out',
+            'process pid not found', 'auth_blocked'
+        )):
+            self.auth_pool.heal_expired_cooldowns()
+            a.session_id = None
+            a.google_session_dir = None
+            a.auth_slot_id = None
+            a.last_error = None
+            a.status = AgentStatus.IDLE
+            action_taken = f"Auto-healed network disconnect/routing failure; auto-resumed on exact model '{model}'."
+
         if action_taken:
             self._write_status(a)
             self.persist()
@@ -1171,7 +1273,7 @@ class Orchestrator:
                     kind = raw.get('kind', 'resume') if isinstance(raw, dict) else getattr(raw, 'kind', 'resume')
                     await self.send(a.project_name, a.id, raw_content, sender_id=sender_id, kind=kind)
                 elif self.inboxes.get(a.id) or a.current_task:
-                    await self.resume_agent(a.project_name, a.id, actor_id='system_root_watchdog')
+                    await self.resume_agent(a.id, message=f"Resumed by Watchdog Fleet Optimizer: {action_taken}")
             return {'healed': True, 'action': action_taken, 'model': model}
 
         return {'healed': False, 'reason': f"Non-recoverable failure requires human instruction: {a.last_error}"}

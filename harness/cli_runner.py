@@ -518,18 +518,13 @@ class CLIRunner:
                         agent.last_turn_usage = payload['usage']
                     if payload.get('status') != 'SUCCESS':
                         error = str(payload.get('error') or 'Antigravity ended with '+str(payload.get('status')))
-                        is_quota_text = bool(re.search(r'individual quota (?:reached|exhausted)|quota exceeded|resource_exhausted', error, re.I))
-                        # AGY permanently carries any historical turn's error in a resumed
-                        # conversation's cumulative `result` summary even when a new turn succeeds
-                        # OR when a resumed turn fails early for a non-quota reason (e.g. stream stall
-                        # "subscriber fell behind updates"). Never trust a quota string in `result.error`
-                        # unless the isolated per-run `--log-file` recorded a real quota failure!
-                        if (completed_response and not current_error_step
+                        # AGY can carry the previous turn's quota string in a resumed
+                        # conversation's result summary even when the new turn completed.
+                        if (previous_google_quota and error == previous_google_quota
+                                and completed_response and not current_error_step
                                 and isinstance(payload.get('response'), str) and payload['response']):
                             stale_quota = True
                             final.append(payload['response'])
-                        elif is_quota_text:
-                            result_quota_error = error
                         else:
                             errors.append(error)
                     elif isinstance(payload.get('response'),str):

@@ -53,19 +53,22 @@ class Ledger{
   }else if(type==='thread.started'){
    if(d.thread_id)this.activeThreadId=d.thread_id;
   }else if(type==='turn.completed'){
-   // Codex CLI turn.completed reports cumulative thread token usage across resumed turns.
    const u=normalize(d.usage,'openai');
    if(u){
-    const threadKey=this.activeThreadId||'codex:'+canonModel(e.model||'default');
-    const prev=this.codexTotals.get(threadKey);
-    const delta={};
-    if(prev&&(u.input||0)>=(prev.input||0)&&(u.output||0)>=(prev.output||0)){
-     for(const k of ['input','output','cache','write'])delta[k]=u[k]===null?null:Math.max(0,u[k]-(prev[k]||0));
+    if(this.activeThreadId){
+     const threadKey=this.activeThreadId;
+     const prev=this.codexTotals.get(threadKey);
+     const delta={};
+     if(prev&&prev.run!==run&&(u.input||0)>=(prev.input||0)&&(u.output||0)>=(prev.output||0)){
+      for(const k of ['input','output','cache','write'])delta[k]=u[k]===null?null:Math.max(0,u[k]-(prev[k]||0));
+     }else{
+      for(const k of ['input','output','cache','write'])delta[k]=u[k];
+     }
+     this.codexTotals.set(threadKey,{...u,run});
+     this.samples.set('codex:'+threadKey+':turn:'+e.id,{...delta,time:e.timestamp,run,model:e.model||null});
     }else{
-     for(const k of ['input','output','cache','write'])delta[k]=u[k];
+     this.usage('turn:'+e.id,d.usage,'openai',e);
     }
-    this.codexTotals.set(threadKey,u);
-    this.samples.set('codex:'+threadKey+':turn:'+e.id,{...delta,time:e.timestamp,run,model:e.model||null});
    }
   }else if(type==='result'){
    if(d.usage)this.usage('summary',d.usage,'anthropic',e,true);

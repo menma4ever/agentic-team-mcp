@@ -1,5 +1,6 @@
 # Agentic Team MCP — Persistent Multi-Agent Orchestration for Model Context Protocol
 
+[![CI](https://github.com/menma4ever/agentic-team-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/menma4ever/agentic-team-mcp/actions/workflows/tests.yml)
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/Release-v0.3.0-blue.svg)](https://github.com/menma4ever/agentic-team-mcp/releases)
@@ -137,7 +138,7 @@ flowchart TD
 ## Key Architectural Capabilities
 
 ### 1. Persistent Multi-Agent State & Event Sourcing
-Unlike ephemeral agent systems that lose all state on reload, Agentic Team MCP records all state mutations, messages, agent definitions, and task outcomes in an event-sourced SQLite database (`team.sqlite3`). If your system reboots, the engine reconstitutes the full agent graph and automatically resumes pending assignments.
+Unlike ephemeral agent systems that lose all state on reload, Agentic Team MCP records all state mutations, messages, agent definitions, and task outcomes in an event-sourced SQLite database (`team.sqlite3`). If your system restarts, the engine reconstitutes the full agent graph, preserves queued assignments, and transitions any interrupted in-flight turns to `PAUSED` so existing artifacts can be inspected before resuming without blindly replaying side effects.
 
 ### 2. Multi-Account Google Auth Pool (`core/auth_pool.py`)
 - **Directory Isolation**: Per-account directory sandboxes (`auth/google/account_XX/`) with separate credential vaults.
@@ -161,8 +162,8 @@ Unlike ephemeral agent systems that lose all state on reload, Agentic Team MCP r
 - **Comprehensive Telemetry**: Granular dashboards tracking `input_tokens`, `output_tokens`, `cache_read_tokens`, and provider burn in real time.
 
 ### 6. Granular Security Boundary
-- **Strict Workspace Sandboxing**: Specialist workers operate strictly within their assigned project directories (`workers/<name>/`).
-- **Automatic Key Redaction**: Zero-secret leakage policy regex-redacts sensitive API keys and tokens across console streams and log files.
+- **Strict Workspace Sandboxing**: Specialist workers operate within their assigned project directories (`workers/<name>/`, `shared/`, and `artifacts/`) for engine file actions.
+- **Automatic Key Redaction**: Regex-based redaction strips configured API keys and common credential patterns across console streams, handoff archives, and event logs.
 
 ---
 

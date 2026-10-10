@@ -30,6 +30,8 @@ ACTIONS = {
  'disconnect_agents': ('Remove visual collaboration links between two agents. Does not stop execution or block messages.', {'source_id':S,'target_id':S}, ['source_id','target_id'], 'all'),
  'list_google_accounts': ('Read registered Google auth accounts and their health/availability.', {}, [], 'all'),
  'force_agent_auth': ('Set your own or a subordinate agent Google account preference for its next credential acquisition. Does not interrupt or switch a running lease. Use auto to clear.', {'target_agent_id':S,'account_id':S}, ['target_agent_id'], 'MANAGER,CEO,HUMAN'),
+ 'optimize_fleet': ('Watchdog Fleet Optimizer: auto-diagnose and heal all failed/stalled agents across project.', {}, [], 'all'),
+ 'optimize_agent': ('Watchdog Agent Optimizer: auto-diagnose and heal a specific agent.', {'target_agent_id':S}, ['target_agent_id'], 'all'),
 }
 
 

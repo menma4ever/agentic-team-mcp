@@ -103,3 +103,9 @@ See the README for reproducible commands. The source archive helper reads only
 allowlisted source files, scans common secret/private-data patterns and exports
 the same scanned bytes with a SHA-256 manifest. This is not a comprehensive secret
 scanner and does not substitute for reviewing the final public repository.
+
+## CI & Release Update (2026-10-10)
+
+- Project-wide MIT `LICENSE` and `NOTICE` files are included at the repository root.
+- Automated verification suite expanded to **120 Python contract/unit tests**, **18 Node.js frontend/telemetry tests**, and `python scripts/check_release.py` source allowlist validation.
+- Hosted GitHub Actions CI (`.github/workflows/tests.yml`) runs on `windows-latest` across dependency checks, Python contract tests, Node.js UI/telemetry tests, and release hygiene checks.

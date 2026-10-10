@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TOP = {'.gitignore', 'README.md', 'requirements.txt', 'main.py', 'Setup.ps1',
        'Launch.cmd', 'deepseek_session.py', 'deepseek.cmd', 'test_system.py',
        'test_web_api.py', 'LICENSE', 'NOTICE', 'SOURCE-MANIFEST.json', 'settings.example.json'}
-FOLDERS = {'core', 'engine', 'harness', 'mcp_server', 'web', 'tests', 'scripts', '.github', 'assets', 'docs'}
+FOLDERS = {'core', 'engine', 'harness', 'mcp_server', 'web', 'tests', 'scripts', '.github', 'assets'}
 TEXT_EXTENSIONS = {'.py', '.js', '.cjs', '.css', '.html', '.svg', '.yml', '.yaml', '.md', '.json', '.cmd', '.ps1'}
 BINARY_EXTENSIONS = {'.png', '.gif', '.ico', '.jpg', '.jpeg', '.webp'}
 EXTENSIONS = TEXT_EXTENSIONS | BINARY_EXTENSIONS

@@ -1591,6 +1591,7 @@ class TelegramBridge:
             return None
         except Exception as e:
             logger.error(f"Telegram API network error on {method}: {e}")
+            time.sleep(3)
             return None
 
     def get_updates(self, offset: int = 0, timeout: int = 30) -> List[Dict[str, Any]]:

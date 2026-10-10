@@ -709,14 +709,14 @@ class GoogleAuthPool:
             parsed_secs = max(1, int(sum(float(value) * units[unit[0].lower()]
                 for value, unit in re.findall(r'(\d+(?:\.\d+)?)\s*(days?|hours?|minutes?|seconds?|min|sec|[dhms])',
                                              m_reset.group(1), re.IGNORECASE))))
-            # Honor the exact reset duration returned by Google's API (5h rolling or 7d weekly window).
-            cooldown_seconds = min(parsed_secs, 604800)
+            # Cap at 5 hours (18000s) because Antigravity quota resets on a 5-hour rolling window.
+            cooldown_seconds = min(parsed_secs, 18000)
             has_explicit_reset = True
 
         # Pattern: "retry after (\d+) seconds" or "retry-after: (\d+)"
         m_retry = re.search(r'retry[- ]after[:\s]+(\d+)', text, re.IGNORECASE)
         if m_retry:
-            cooldown_seconds = min(int(m_retry.group(1)), 604800)
+            cooldown_seconds = min(int(m_retry.group(1)), 18000)
             has_explicit_reset = True
 
         # Pattern: ISO timestamp "after 2026-09-20T17:00:00Z"
@@ -727,7 +727,7 @@ class GoogleAuthPool:
                 dt = datetime.fromisoformat(parsed_iso.replace('Z', '+00:00'))
                 if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
                 diff = (dt - datetime.now(timezone.utc)).total_seconds()
-                cooldown_seconds = min(max(60, int(diff)), 604800)
+                cooldown_seconds = min(max(60, int(diff)), 18000)
                 has_explicit_reset = True
             except Exception:
                 pass
