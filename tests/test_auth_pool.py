@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,7 +42,7 @@ class AuthPoolTests(unittest.IsolatedAsyncioTestCase):
         temp_root.mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=temp_root)
         self.root = Path(self.temp.name).resolve()
-        self.config = SystemSettings(cli_auth_enabled={'agy': True})
+        self.config = SystemSettings(cli_auth_enabled={'agy': True}, cli_paths={'agy': sys.executable})
         self.pool = GoogleAuthPool(self.root)
         for method, value in [('read_credential',None),('write_credential',True),('delete_credential',True)]:
             patcher=patch('core.auth_pool.WindowsKeyringHelper.'+method,return_value=value)
